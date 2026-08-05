@@ -1,0 +1,48 @@
+version: 2
+
+builds:
+  - env:
+      - CGO_ENABLED=0
+    binary: altiro-hhtracker
+    targets:
+      - darwin_arm64
+      - darwin_amd64
+      - linux_amd64
+      - windows_amd64
+
+archives:
+  - format: tar.gz
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - instructions.md
+
+checksum:
+  name_template: checksums.txt
+  algorithm: sha256
+
+brews:
+  - name: altiro-hhtracker
+    repository:
+      owner: serumax
+      name: homebrew-tap
+    description: "Work-hours MCP tracker for AI coding sessions"
+    homepage: "https://github.com/serumax/altiro-hhtracker"
+    install: |
+      bin.install "altiro-hhtracker"
+    skip_upload: false
+
+changelog:
+  sort: asc
+  groups:
+    - title: Features
+      regexp: "^feat"
+      order: 0
+    - title: Bug Fixes
+      regexp: "^fix"
+      order: 1
+    - title: Other
+      regexp: "^chore"
+      order: 2
