@@ -345,6 +345,8 @@ func installCmd() {
 }
 
 func installClaudeCode() error {
+	// Remove first so re-runs are idempotent (mcp add fails if name exists).
+	exec.Command("claude", "mcp", "remove", "altiro-hhtracker", "--scope", "user").Run()
 	out, err := exec.Command("claude", "mcp", "add", "altiro-hhtracker", "--scope", "user", "--", "altiro-hhtracker").CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
