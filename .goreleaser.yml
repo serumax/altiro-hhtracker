@@ -32,7 +32,7 @@ brews:
     homepage: "https://github.com/serumax/altiro-hhtracker"
     install: |
       bin.install "altiro-hhtracker"
-    skip_upload: false
+    skip_upload: true
 
 changelog:
   sort: asc
