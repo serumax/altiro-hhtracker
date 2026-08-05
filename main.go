@@ -4,9 +4,11 @@ import (
 	"context"
 	"database/sql"
 	_ "embed"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -20,6 +22,11 @@ import (
 var instructions string
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "install" {
+		installCmd()
+		return
+	}
+
 	home, err := os.UserHomeDir()
 	if err != nil {
 		log.Fatalf("UserHomeDir: %v", err)
@@ -293,6 +300,88 @@ func hhMesHandler(db *sql.DB) server.ToolHandlerFunc {
 }
 
 // ---- Internal helpers -------------------------------------------------------
+
+// ---- Install subcommand -------------------------------------------------------
+
+func installCmd() {
+	home, err := os.UserHomeDir()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: no se pudo encontrar el home: %v\n", err)
+		os.Exit(1)
+	}
+
+	found := false
+
+	// Claude Code — ~/.claude.json exists
+	claudeJSON := filepath.Join(home, ".claude.json")
+	if _, err := os.Stat(claudeJSON); err == nil {
+		if err := installClaudeCode(); err != nil {
+			fmt.Printf("Claude Code: ERROR — %v\n", err)
+		} else {
+			fmt.Println("Claude Code: ✓ registrado")
+			found = true
+		}
+	}
+
+	// OpenCode — ~/.config/opencode/config.json exists
+	opencodeCfg := filepath.Join(home, ".config", "opencode", "config.json")
+	if _, err := os.Stat(opencodeCfg); err == nil {
+		if err := installOpenCode(opencodeCfg); err != nil {
+			fmt.Printf("OpenCode:    ERROR — %v\n", err)
+		} else {
+			fmt.Println("OpenCode:    ✓ registrado")
+			found = true
+		}
+	}
+
+	if !found {
+		fmt.Println("No se detectó ningún cliente compatible (Claude Code, OpenCode).")
+		fmt.Println("Agrega manualmente a tu cliente MCP:")
+		fmt.Println(`  command: altiro-hhtracker`)
+		return
+	}
+
+	fmt.Println("\nListo. Reinicia tu cliente para activar altiro-hhtracker.")
+}
+
+func installClaudeCode() error {
+	out, err := exec.Command("claude", "mcp", "add", "altiro-hhtracker", "--scope", "user", "--", "altiro-hhtracker").CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+func installOpenCode(cfgPath string) error {
+	raw, err := os.ReadFile(cfgPath)
+	if err != nil {
+		return fmt.Errorf("leer config: %v", err)
+	}
+
+	var cfg map[string]any
+	if err := json.Unmarshal(raw, &cfg); err != nil {
+		return fmt.Errorf("parsear config: %v", err)
+	}
+
+	if cfg["mcp"] == nil {
+		cfg["mcp"] = map[string]any{}
+	}
+	mcpBlock, ok := cfg["mcp"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("la clave 'mcp' en config.json no es un objeto")
+	}
+
+	mcpBlock["altiro-hhtracker"] = map[string]any{
+		"type":    "local",
+		"command": "altiro-hhtracker",
+	}
+
+	out, err := json.MarshalIndent(cfg, "", "  ")
+	if err != nil {
+		return fmt.Errorf("serializar config: %v", err)
+	}
+	return os.WriteFile(cfgPath, out, 0644)
+}
 
 // normalizeTimestamp converts a bare HH:MM string to a full ISO timestamp
 // using today's date. Strings that already contain a date separator are
