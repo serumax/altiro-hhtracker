@@ -1,0 +1,6 @@
+# Build artifacts
+/altiro-hhtracker
+/dist/
+
+# Local tooling
+/.atl/
