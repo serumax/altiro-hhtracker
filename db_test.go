@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -281,7 +282,7 @@ func TestListClosedOrderDesc(t *testing.T) {
 	seedClosed(t, db, "earlier", "proj", "2026-08-01T09:00:00.000000", "2026-08-01T10:00:00.000000", 1.0)
 	seedClosed(t, db, "later", "proj", "2026-08-02T09:00:00.000000", "2026-08-02T10:00:00.000000", 1.0)
 
-	rows, err := listClosed(db, "", "")
+	rows, err := listClosed(db, "", "", "")
 	if err != nil {
 		t.Fatalf("listClosed: %v", err)
 	}
@@ -299,7 +300,7 @@ func TestListReporteOrderAsc(t *testing.T) {
 	seedClosed(t, db, "earlier", "proj", "2026-08-01T09:00:00.000000", "2026-08-01T10:00:00.000000", 1.0)
 	seedClosed(t, db, "later", "proj", "2026-08-02T09:00:00.000000", "2026-08-02T10:00:00.000000", 1.0)
 
-	rows, err := listReporte(db, "2026-08-01", "2026-08-02")
+	rows, err := listReporte(db, "2026-08-01", "2026-08-02", "")
 	if err != nil {
 		t.Fatalf("listReporte: %v", err)
 	}
@@ -318,7 +319,7 @@ func TestListClosedDateFilter(t *testing.T) {
 	seedClosed(t, db, "in-range", "proj", "2026-08-03T09:00:00.000000", "2026-08-03T10:00:00.000000", 1.0)
 	seedClosed(t, db, "out-range", "proj", "2026-07-01T09:00:00.000000", "2026-07-01T10:00:00.000000", 1.0)
 
-	rows, err := listClosed(db, "2026-08-01", "2026-08-31")
+	rows, err := listClosed(db, "2026-08-01", "2026-08-31", "")
 	if err != nil {
 		t.Fatalf("listClosed with filter: %v", err)
 	}
@@ -474,6 +475,134 @@ func TestWeekRangePreviousWeek(t *testing.T) {
 	}
 	if !sunday.Equal(wantSun) {
 		t.Errorf("weekRange -1 sunday: got %v, want %v", sunday, wantSun)
+	}
+}
+
+// ---- deleteEntry --------------------------------------------------------
+
+func TestDeleteEntryRemovesRow(t *testing.T) {
+	db := openTestDB(t)
+
+	id, _, err := insertOpen(db, "borrable", "proj")
+	if err != nil {
+		t.Fatalf("insertOpen: %v", err)
+	}
+
+	if err := deleteEntry(db, int(id)); err != nil {
+		t.Fatalf("deleteEntry: %v", err)
+	}
+
+	if _, err := getEntry(db, id); !errors.Is(err, sql.ErrNoRows) {
+		t.Errorf("deleteEntry: expected row gone, getEntry err = %v", err)
+	}
+}
+
+func TestDeleteEntryNotFound(t *testing.T) {
+	db := openTestDB(t)
+
+	if err := deleteEntry(db, 4242); err == nil {
+		t.Error("deleteEntry with missing id: expected error, got nil")
+	}
+}
+
+// ---- updateEntry ------------------------------------------------------------
+
+func TestUpdateEntryChangesProyecto(t *testing.T) {
+	db := openTestDB(t)
+
+	id, _, err := insertOpen(db, "tarea", "demo")
+	if err != nil {
+		t.Fatalf("insertOpen: %v", err)
+	}
+
+	entry, err := updateEntry(db, int(id), "", "v-max", "", "", "", 0)
+	if err != nil {
+		t.Fatalf("updateEntry: %v", err)
+	}
+	if entry.Proyecto != "v-max" {
+		t.Errorf("updateEntry proyecto: got %q, want %q", entry.Proyecto, "v-max")
+	}
+	if entry.Descripcion != "tarea" {
+		t.Errorf("updateEntry: descripcion should be unchanged, got %q", entry.Descripcion)
+	}
+}
+
+func TestUpdateEntryRecomputesDuration(t *testing.T) {
+	db := openTestDB(t)
+
+	seedClosed(t, db, "x", "p",
+		"2026-08-05T09:00:00.000000", "2026-08-05T10:00:00.000000", 1.0)
+
+	var id int
+	if err := db.QueryRow(`SELECT id FROM entries LIMIT 1`).Scan(&id); err != nil {
+		t.Fatalf("select id: %v", err)
+	}
+
+	entry, err := updateEntry(db, id, "", "", "", "2026-08-05T12:00:00.000000", "", 0)
+	if err != nil {
+		t.Fatalf("updateEntry: %v", err)
+	}
+	if !entry.DuracionHH.Valid || absDiff(entry.DuracionHH.Float64, 3.0) > 0.001 {
+		t.Errorf("updateEntry: duracion_hh = %v, want ~3.0", entry.DuracionHH)
+	}
+}
+
+func TestUpdateEntryExplicitDuracionWins(t *testing.T) {
+	db := openTestDB(t)
+
+	seedClosed(t, db, "x", "p",
+		"2026-08-05T09:00:00.000000", "2026-08-05T10:00:00.000000", 1.0)
+
+	var id int
+	if err := db.QueryRow(`SELECT id FROM entries LIMIT 1`).Scan(&id); err != nil {
+		t.Fatalf("select id: %v", err)
+	}
+
+	entry, err := updateEntry(db, id, "", "", "", "", "", 5.0)
+	if err != nil {
+		t.Fatalf("updateEntry: %v", err)
+	}
+	if absDiff(entry.DuracionHH.Float64, 5.0) > 0.001 {
+		t.Errorf("updateEntry: duracion_hh = %v, want 5.0", entry.DuracionHH.Float64)
+	}
+}
+
+func TestUpdateEntryNoFields(t *testing.T) {
+	db := openTestDB(t)
+
+	id, _, err := insertOpen(db, "tarea", "p")
+	if err != nil {
+		t.Fatalf("insertOpen: %v", err)
+	}
+	if _, err := updateEntry(db, int(id), "", "", "", "", "", 0); err == nil {
+		t.Error("updateEntry with no fields: expected error, got nil")
+	}
+}
+
+func TestUpdateEntryNotFound(t *testing.T) {
+	db := openTestDB(t)
+
+	if _, err := updateEntry(db, 9999, "", "x", "", "", "", 0); err == nil {
+		t.Error("updateEntry with missing id: expected error, got nil")
+	}
+}
+
+// ---- listClosed proyecto filter -------------------------------------------
+
+func TestListClosedProyectoFilter(t *testing.T) {
+	db := openTestDB(t)
+
+	seedClosed(t, db, "a", "demo",
+		"2026-08-03T09:00:00.000000", "2026-08-03T10:00:00.000000", 1.0)
+	seedClosed(t, db, "b", "v-max",
+		"2026-08-03T09:00:00.000000", "2026-08-03T10:00:00.000000", 1.0)
+
+	rows, err := listClosed(db, "", "", "demo")
+	if err != nil {
+		t.Fatalf("listClosed: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Proyecto != "demo" {
+		t.Fatalf("listClosed proyecto filter: got %+v", rows)
 	}
 }
 

@@ -194,6 +194,147 @@ func TestHhReport_EmptyReturnsNonEmptyMessage(t *testing.T) {
 	}
 }
 
+// ---- version --------------------------------------------------------------
+
+func TestVersionLine_IncludesBinaryName(t *testing.T) {
+	line := versionLine()
+	if !strings.Contains(line, "altiro-hhtracker") {
+		t.Errorf("versionLine: got %q, want it to contain 'altiro-hhtracker'", line)
+	}
+	if !strings.Contains(line, version) {
+		t.Errorf("versionLine: got %q, want it to contain version %q", line, version)
+	}
+}
+
+// ---- hh_delete -------------------------------------------------------------
+
+func TestHhDelete_RemovesEntry(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	_, _ = hhStartHandler(db)(ctx, callReq(map[string]any{
+		"descripcion": "borrar esto",
+		"proyecto":    "p",
+	}))
+
+	result, err := hhDeleteHandler(db)(ctx, callReq(map[string]any{
+		"entry_id": float64(1),
+	}))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !strings.Contains(textOf(t, result), "#1") {
+		t.Errorf("expected #1 in delete output, got: %q", textOf(t, result))
+	}
+
+	st, _ := hhStatusHandler(db)(ctx, callReq(nil))
+	if !strings.Contains(textOf(t, st), "No hay") {
+		t.Errorf("expected no open entries after delete, got: %q", textOf(t, st))
+	}
+}
+
+func TestHhDelete_NonExistentReturnsError(t *testing.T) {
+	db := newTestDB(t)
+
+	result, err := hhDeleteHandler(db)(context.Background(), callReq(map[string]any{
+		"entry_id": float64(777),
+	}))
+	if err != nil {
+		t.Fatalf("unexpected Go error: %v", err)
+	}
+	if !strings.Contains(textOf(t, result), "777") {
+		t.Errorf("expected id 777 in error message, got: %q", textOf(t, result))
+	}
+}
+
+func TestHhDelete_MissingEntryIDReturnsError(t *testing.T) {
+	db := newTestDB(t)
+
+	result, _ := hhDeleteHandler(db)(context.Background(), callReq(map[string]any{}))
+	if !strings.Contains(strings.ToUpper(textOf(t, result)), "ERROR") {
+		t.Errorf("expected error for missing entry_id, got: %q", textOf(t, result))
+	}
+}
+
+// ---- hh_update ------------------------------------------------------------
+
+func TestHhUpdate_ChangesProyecto(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	_, _ = hhStartHandler(db)(ctx, callReq(map[string]any{
+		"descripcion": "tarea",
+		"proyecto":    "demo",
+	}))
+
+	result, err := hhUpdateHandler(db)(ctx, callReq(map[string]any{
+		"entry_id": float64(1),
+		"proyecto": "v-max",
+	}))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !strings.Contains(textOf(t, result), "v-max") {
+		t.Errorf("expected v-max in output, got: %q", textOf(t, result))
+	}
+}
+
+func TestHhUpdate_MissingEntryIDReturnsError(t *testing.T) {
+	db := newTestDB(t)
+
+	result, _ := hhUpdateHandler(db)(context.Background(), callReq(map[string]any{
+		"proyecto": "x",
+	}))
+	if !strings.Contains(strings.ToUpper(textOf(t, result)), "ERROR") {
+		t.Errorf("expected error for missing entry_id, got: %q", textOf(t, result))
+	}
+}
+
+func TestHhUpdate_NoFieldsReturnsError(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	_, _ = hhStartHandler(db)(ctx, callReq(map[string]any{
+		"descripcion": "tarea",
+		"proyecto":    "p",
+	}))
+
+	result, _ := hhUpdateHandler(db)(ctx, callReq(map[string]any{
+		"entry_id": float64(1),
+	}))
+	if !strings.Contains(strings.ToUpper(textOf(t, result)), "ERROR") {
+		t.Errorf("expected error when no fields given, got: %q", textOf(t, result))
+	}
+}
+
+// ---- hh_report proyecto filter -------------------------------------------
+
+func TestHhReport_ProyectoFilter(t *testing.T) {
+	db := newTestDB(t)
+	ctx := context.Background()
+
+	_, _ = hhManualHandler(db)(ctx, callReq(map[string]any{
+		"descripcion": "trabajo demo", "proyecto": "demo", "duracion_hh": float64(1),
+	}))
+	_, _ = hhManualHandler(db)(ctx, callReq(map[string]any{
+		"descripcion": "trabajo vmax", "proyecto": "v-max", "duracion_hh": float64(1),
+	}))
+
+	result, err := hhReportHandler(db)(ctx, callReq(map[string]any{
+		"proyecto": "demo",
+	}))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	text := textOf(t, result)
+	if !strings.Contains(text, "trabajo demo") {
+		t.Errorf("expected demo entry in output, got: %q", text)
+	}
+	if strings.Contains(text, "trabajo vmax") {
+		t.Errorf("did not expect v-max entry in filtered output, got: %q", text)
+	}
+}
+
 // ---- hh_manual --------------------------------------------------------------
 
 func TestHhManual_ModeB_DuracionHH(t *testing.T) {

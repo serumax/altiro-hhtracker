@@ -21,10 +21,22 @@ import (
 //go:embed instructions.md
 var instructions string
 
+// version is overridden at build time by GoReleaser via -ldflags -X main.version.
+var version = "dev"
+
 func main() {
-	if len(os.Args) > 1 && os.Args[1] == "install" {
-		installCmd()
-		return
+	if len(os.Args) > 1 {
+		switch os.Args[1] {
+		case "install":
+			installCmd()
+			return
+		case "version", "--version", "-v":
+			fmt.Println(versionLine())
+			return
+		case "help", "--help", "-h":
+			printHelp()
+			return
+		}
 	}
 
 	home, err := os.UserHomeDir()
@@ -76,12 +88,38 @@ func main() {
 		mcp.WithDescription("Lista todas las entradas actualmente abiertas."),
 	), hhStatusHandler(db))
 
+	s.AddTool(mcp.NewTool("hh_delete",
+		mcp.WithDescription("Borra una entrada por ID (abierta o cerrada)."),
+		mcp.WithNumber("entry_id", mcp.Required(),
+			mcp.Description("ID de la entrada a borrar.")),
+	), hhDeleteHandler(db))
+
+	s.AddTool(mcp.NewTool("hh_update",
+		mcp.WithDescription("Actualiza campos de una entrada existente. Solo se pasan los campos a cambiar."),
+		mcp.WithNumber("entry_id", mcp.Required(),
+			mcp.Description("ID de la entrada a actualizar.")),
+		mcp.WithString("descripcion",
+			mcp.Description("Nueva descripción.")),
+		mcp.WithString("proyecto",
+			mcp.Description("Nuevo proyecto.")),
+		mcp.WithString("inicio",
+			mcp.Description("Nuevo inicio (ISO o HH:MM — se asume hoy).")),
+		mcp.WithString("fin",
+			mcp.Description("Nuevo fin (ISO o HH:MM — se asume hoy).")),
+		mcp.WithString("resumen",
+			mcp.Description("Nuevo resumen.")),
+		mcp.WithNumber("duracion_hh",
+			mcp.Description("Duración explícita en horas. Si se omite y hay inicio y fin, se recalcula.")),
+	), hhUpdateHandler(db))
+
 	s.AddTool(mcp.NewTool("hh_report",
 		mcp.WithDescription("Lista las entradas cerradas en un rango de fechas opcional."),
 		mcp.WithString("desde",
 			mcp.Description("Fecha de inicio YYYY-MM-DD (inclusive).")),
 		mcp.WithString("hasta",
 			mcp.Description("Fecha de fin YYYY-MM-DD (inclusive).")),
+		mcp.WithString("proyecto",
+			mcp.Description("Filtra por proyecto (opcional).")),
 	), hhReportHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_manual",
@@ -102,12 +140,16 @@ func main() {
 		mcp.WithDescription("Reporte de horas de la semana."),
 		mcp.WithNumber("offset",
 			mcp.Description("Desplazamiento de semana (0=esta semana, -1=semana pasada).")),
+		mcp.WithString("proyecto",
+			mcp.Description("Filtra por proyecto (opcional).")),
 	), hhSemanaHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_mes",
 		mcp.WithDescription("Reporte de horas del mes."),
 		mcp.WithNumber("offset",
 			mcp.Description("Desplazamiento de mes (0=este mes, -1=mes pasado).")),
+		mcp.WithString("proyecto",
+			mcp.Description("Filtra por proyecto (opcional).")),
 	), hhMesHandler(db))
 
 	if err := server.ServeStdio(s); err != nil {
@@ -169,6 +211,51 @@ func hhCloseHandler(db *sql.DB) server.ToolHandlerFunc {
 	}
 }
 
+func hhDeleteHandler(db *sql.DB) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		entryID := req.GetInt("entry_id", 0)
+		if entryID == 0 {
+			return mcp.NewToolResultText("ERROR: entry_id es requerido."), nil
+		}
+
+		if err := deleteEntry(db, entryID); err != nil {
+			return mcp.NewToolResultText(fmt.Sprintf("ERROR: %v", err)), nil
+		}
+
+		return mcp.NewToolResultText(fmt.Sprintf("🗑️  Entrada #%d borrada", entryID)), nil
+	}
+}
+
+func hhUpdateHandler(db *sql.DB) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		entryID := req.GetInt("entry_id", 0)
+		if entryID == 0 {
+			return mcp.NewToolResultText("ERROR: entry_id es requerido."), nil
+		}
+
+		descripcion := req.GetString("descripcion", "")
+		proyecto := req.GetString("proyecto", "")
+		inicio := req.GetString("inicio", "")
+		fin := req.GetString("fin", "")
+		resumen := req.GetString("resumen", "")
+		duracionHH := req.GetFloat("duracion_hh", 0)
+
+		entry, err := updateEntry(db, entryID, descripcion, proyecto, inicio, fin, resumen, duracionHH)
+		if err != nil {
+			return mcp.NewToolResultText(fmt.Sprintf("ERROR: %v", err)), nil
+		}
+
+		durStr := ""
+		if entry.DuracionHH.Valid {
+			durStr = " — " + fmtDuracion(entry.DuracionHH.Float64)
+		}
+		return mcp.NewToolResultText(fmt.Sprintf(
+			"✏️  Entrada #%d actualizada\n   %s [%s] %s%s",
+			entry.ID, entry.Descripcion, entry.Proyecto, entry.Inicio[:16], durStr,
+		)), nil
+	}
+}
+
 func hhStatusHandler(db *sql.DB) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		entries, err := listOpen(db)
@@ -193,8 +280,9 @@ func hhReportHandler(db *sql.DB) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		desde := req.GetString("desde", "")
 		hasta := req.GetString("hasta", "")
+		proyecto := req.GetString("proyecto", "")
 
-		entries, err := listClosed(db, desde, hasta)
+		entries, err := listClosed(db, desde, hasta, proyecto)
 		if err != nil {
 			return mcp.NewToolResultText(fmt.Sprintf("ERROR: %v", err)), nil
 		}
@@ -254,13 +342,14 @@ func hhManualHandler(db *sql.DB) server.ToolHandlerFunc {
 func hhSemanaHandler(db *sql.DB) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		offset := req.GetInt("offset", 0)
+		proyecto := req.GetString("proyecto", "")
 		now := time.Now()
 		monday, sunday := weekRange(now, offset)
 
 		desde := monday.Format("2006-01-02")
 		hasta := sunday.Format("2006-01-02")
 
-		entries, err := listReporte(db, desde, hasta)
+		entries, err := listReporte(db, desde, hasta, proyecto)
 		if err != nil {
 			return mcp.NewToolResultText(fmt.Sprintf("ERROR: %v", err)), nil
 		}
@@ -280,13 +369,14 @@ func hhSemanaHandler(db *sql.DB) server.ToolHandlerFunc {
 func hhMesHandler(db *sql.DB) server.ToolHandlerFunc {
 	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
 		offset := req.GetInt("offset", 0)
+		proyecto := req.GetString("proyecto", "")
 		now := time.Now()
 		first, last := monthRange(now, offset)
 
 		desde := first.Format("2006-01-02")
 		hasta := last.Format("2006-01-02")
 
-		entries, err := listReporte(db, desde, hasta)
+		entries, err := listReporte(db, desde, hasta, proyecto)
 		if err != nil {
 			return mcp.NewToolResultText(fmt.Sprintf("ERROR: %v", err)), nil
 		}
@@ -300,6 +390,24 @@ func hhMesHandler(db *sql.DB) server.ToolHandlerFunc {
 }
 
 // ---- Internal helpers -------------------------------------------------------
+
+func versionLine() string {
+	return "altiro-hhtracker " + version
+}
+
+func printHelp() {
+	fmt.Println(versionLine())
+	fmt.Println()
+	fmt.Println("Servidor MCP para registrar horas de trabajo. Sin argumentos, corre por stdio.")
+	fmt.Println()
+	fmt.Println("Subcomandos:")
+	fmt.Println("  install            Registra el servidor en Claude Code / OpenCode")
+	fmt.Println("  version|--version  Muestra la versión")
+	fmt.Println("  help|--help        Muestra esta ayuda")
+	fmt.Println()
+	fmt.Println("Tools MCP: hh_start, hh_close, hh_status, hh_delete, hh_update,")
+	fmt.Println("           hh_manual, hh_report, hh_semana, hh_mes")
+}
 
 // ---- Install subcommand -------------------------------------------------------
 

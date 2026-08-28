@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -143,6 +144,99 @@ func closeEntry(db *sql.DB, id int, resumen string) (Entry, error) {
 	return getEntry(db, int64(id))
 }
 
+// deleteEntry removes an entry (open or closed) by id. It returns an error
+// when no row matches, so callers can report "not found" to the user.
+func deleteEntry(db *sql.DB, id int) error {
+	res, err := db.Exec(`DELETE FROM entries WHERE id=?`, id)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 0 {
+		return fmt.Errorf("No se encontró la entrada #%d.", id)
+	}
+	return nil
+}
+
+// updateEntry patches the given fields of an entry. Empty strings and a zero
+// duracionHH mean "leave unchanged", matching the rest of this package. When
+// the row ends up with both inicio and fin and no explicit duracionHH was
+// given, duracion_hh is recomputed from those timestamps.
+func updateEntry(db *sql.DB, id int, descripcion, proyecto, inicio, fin, resumen string, duracionHH float64) (Entry, error) {
+	inicio = normalizeTimestamp(inicio)
+	fin = normalizeTimestamp(fin)
+
+	var sets []string
+	var args []interface{}
+	add := func(col string, val interface{}) {
+		sets = append(sets, col+"=?")
+		args = append(args, val)
+	}
+
+	if descripcion != "" {
+		add("descripcion", descripcion)
+	}
+	if proyecto != "" {
+		add("proyecto", proyecto)
+	}
+	if inicio != "" {
+		add("inicio", inicio)
+	}
+	if fin != "" {
+		add("fin", fin)
+	}
+	if resumen != "" {
+		add("resumen", resumen)
+	}
+	if duracionHH > 0 {
+		add("duracion_hh", duracionHH)
+	}
+
+	if len(sets) == 0 {
+		return Entry{}, fmt.Errorf("ERROR: no hay campos para actualizar.")
+	}
+
+	args = append(args, id)
+	res, err := db.Exec(`UPDATE entries SET `+strings.Join(sets, ", ")+` WHERE id=?`, args...)
+	if err != nil {
+		return Entry{}, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return Entry{}, err
+	}
+	if n == 0 {
+		return Entry{}, fmt.Errorf("No se encontró la entrada #%d.", id)
+	}
+
+	updated, err := getEntry(db, int64(id))
+	if err != nil {
+		return Entry{}, err
+	}
+
+	// Recompute duration when times are present and no explicit value was given.
+	if duracionHH <= 0 && updated.Fin.Valid && updated.Inicio != "" {
+		inicioT, err := parseTS(updated.Inicio)
+		if err != nil {
+			return Entry{}, fmt.Errorf("updateEntry parse inicio: %w", err)
+		}
+		finT, err := parseTS(updated.Fin.String)
+		if err != nil {
+			return Entry{}, fmt.Errorf("updateEntry parse fin: %w", err)
+		}
+		durHH := finT.Sub(inicioT).Seconds() / 3600
+		if _, err := db.Exec(`UPDATE entries SET duracion_hh=? WHERE id=?`, durHH, id); err != nil {
+			return Entry{}, err
+		}
+		return getEntry(db, int64(id))
+	}
+
+	return updated, nil
+}
+
 // listOpen returns all open entries ordered by inicio DESC.
 func listOpen(db *sql.DB) ([]Entry, error) {
 	rows, err := db.Query(
@@ -156,9 +250,10 @@ func listOpen(db *sql.DB) ([]Entry, error) {
 	return scanEntries(rows)
 }
 
-// listClosed returns closed entries, optionally filtered by date range, ordered DESC.
-func listClosed(db *sql.DB, desde, hasta string) ([]Entry, error) {
-	query, args := closedQuery("ORDER BY inicio DESC", desde, hasta)
+// listClosed returns closed entries, optionally filtered by date range and
+// proyecto, ordered DESC.
+func listClosed(db *sql.DB, desde, hasta, proyecto string) ([]Entry, error) {
+	query, args := closedQuery("ORDER BY inicio DESC", desde, hasta, proyecto)
 	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -167,9 +262,10 @@ func listClosed(db *sql.DB, desde, hasta string) ([]Entry, error) {
 	return scanEntries(rows)
 }
 
-// listReporte returns closed entries in the date range ordered ASC (for hh_semana/hh_mes).
-func listReporte(db *sql.DB, desde, hasta string) ([]Entry, error) {
-	query, args := closedQuery("ORDER BY inicio ASC", desde, hasta)
+// listReporte returns closed entries in the date range ordered ASC (for hh_semana/hh_mes),
+// optionally filtered by proyecto.
+func listReporte(db *sql.DB, desde, hasta, proyecto string) ([]Entry, error) {
+	query, args := closedQuery("ORDER BY inicio ASC", desde, hasta, proyecto)
 	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
@@ -268,7 +364,7 @@ func nullableString(s string) interface{} {
 	return s
 }
 
-func closedQuery(order, desde, hasta string) (string, []interface{}) {
+func closedQuery(order, desde, hasta, proyecto string) (string, []interface{}) {
 	base := `SELECT id, descripcion, proyecto, inicio, fin, duracion_hh, resumen, estado
 	         FROM entries WHERE estado='cerrado'`
 	var args []interface{}
@@ -281,6 +377,10 @@ func closedQuery(order, desde, hasta string) (string, []interface{}) {
 	} else if hasta != "" {
 		base += ` AND DATE(inicio) <= ?`
 		args = append(args, hasta)
+	}
+	if proyecto != "" {
+		base += ` AND proyecto = ?`
+		args = append(args, proyecto)
 	}
 	return base + " " + order, args
 }

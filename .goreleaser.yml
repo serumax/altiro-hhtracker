@@ -4,6 +4,8 @@ builds:
   - env:
       - CGO_ENABLED=0
     binary: altiro-hhtracker
+    ldflags:
+      - -s -w -X main.version={{.Version}}
     targets:
       - darwin_arm64
       - darwin_amd64
