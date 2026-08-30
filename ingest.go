@@ -2,9 +2,13 @@ package main
 
 import (
 	"bufio"
+	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"time"
 )
 
 // deriveProyecto guesses a project name for a working directory. It walks up
@@ -85,4 +89,147 @@ func repoNameFromURL(url string) string {
 		return ""
 	}
 	return seg[len(seg)-1]
+}
+
+// ---- opencode ingester --------------------------------------------------------
+
+type opencodeMessage struct {
+	Role string `json:"role"`
+	Path struct {
+		Cwd  string `json:"cwd"`
+		Root string `json:"root"`
+	} `json:"path"`
+	Cost   float64 `json:"cost"`
+	Tokens struct {
+		Input  int64 `json:"input"`
+		Output int64 `json:"output"`
+		Cache  struct {
+			Read  int64 `json:"read"`
+			Write int64 `json:"write"`
+		} `json:"cache"`
+	} `json:"tokens"`
+	ModelID    string `json:"modelID"`
+	ProviderID string `json:"providerID"`
+	Time       struct {
+		Created   int64 `json:"created"`
+		Completed int64 `json:"completed"`
+	} `json:"time"`
+	Error json.RawMessage `json:"error"`
+}
+
+// ingestOpencode scans an opencode sqlite database for assistant responses and
+// records the new ones in the responses table. It is idempotent: a per-source
+// watermark plus the UNIQUE(source, external_id) constraint prevent re-import.
+func ingestOpencode(db *sql.DB, srcPath string, now time.Time) (int, error) {
+	if _, err := os.Stat(srcPath); err != nil {
+		return 0, nil
+	}
+
+	src, err := sql.Open("sqlite", "file:"+srcPath+"?mode=ro")
+	if err != nil {
+		return 0, nil
+	}
+	defer src.Close()
+
+	var watermark int64
+	if wm, err := getWatermark(db, "opencode"); err != nil {
+		return 0, err
+	} else if wm != "" {
+		watermark, _ = strconv.ParseInt(wm, 10, 64)
+	}
+
+	rows, err := src.Query(
+		`SELECT m.id, m.time_created, m.data, s.directory, p.name
+		 FROM message m
+		 JOIN session s ON s.id = m.session_id
+		 LEFT JOIN project p ON p.id = s.project_id
+		 WHERE m.time_created > ?
+		 ORDER BY m.time_created ASC`, watermark)
+	if err != nil {
+		return 0, err
+	}
+	defer rows.Close()
+
+	maxSeen := watermark
+	inserted := 0
+	for rows.Next() {
+		var (
+			id          string
+			timeCreated int64
+			data        string
+			directory   sql.NullString
+			projectName sql.NullString
+		)
+		if err := rows.Scan(&id, &timeCreated, &data, &directory, &projectName); err != nil {
+			return inserted, err
+		}
+		if timeCreated > maxSeen {
+			maxSeen = timeCreated
+		}
+
+		var m opencodeMessage
+		if err := json.Unmarshal([]byte(data), &m); err != nil {
+			continue
+		}
+		if m.Role != "assistant" {
+			continue
+		}
+		if len(m.Error) > 0 && string(m.Error) != "null" {
+			continue
+		}
+		if m.Time.Completed == 0 {
+			continue
+		}
+
+		modelo := m.ModelID
+		if m.ProviderID != "" {
+			modelo = m.ProviderID + "/" + m.ModelID
+		}
+
+		proyecto := ""
+		if projectName.Valid && projectName.String != "" {
+			proyecto = projectName.String
+		} else if directory.Valid && directory.String != "" {
+			proyecto = deriveProyecto(directory.String)
+		} else if m.Path.Cwd != "" {
+			proyecto = deriveProyecto(m.Path.Cwd)
+		}
+
+		entryID, err := singleOpenEntryID(db)
+		if err != nil {
+			return inserted, err
+		}
+
+		r := Response{
+			Ts:          time.UnixMilli(m.Time.Completed).Local().Format(tsLayout),
+			Proyecto:    proyecto,
+			Cliente:     "opencode",
+			Modelo:      modelo,
+			DuracionS:   sql.NullFloat64{Float64: float64(m.Time.Completed-m.Time.Created) / 1000.0, Valid: true},
+			TokensIn:    m.Tokens.Input,
+			TokensOut:   m.Tokens.Output,
+			TokensCache: m.Tokens.Cache.Read + m.Tokens.Cache.Write,
+			CostoUSD:    m.Cost,
+			EntryID:     entryID,
+			Source:      "opencode",
+			ExternalID:  id,
+		}
+		ok, err := insertResponse(db, r)
+		if err != nil {
+			return inserted, err
+		}
+		if ok {
+			inserted++
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return inserted, err
+	}
+
+	if maxSeen != watermark {
+		if err := setWatermark(db, "opencode", strconv.FormatInt(maxSeen, 10)); err != nil {
+			return inserted, err
+		}
+	}
+	return inserted, nil
 }
