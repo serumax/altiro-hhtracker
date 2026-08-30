@@ -2,79 +2,63 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 )
 
-// deriveProyecto guesses a project name for a working directory. It walks up
-// looking for a .git directory. When found it prefers the origin remote's repo
-// name, falling back to the basename of the git root. With no .git anywhere it
-// returns the basename of dir.
+// proyectoCache memoizes deriveProyecto results (dir -> proyecto) so repeated
+// directories within a single ingest pass do not re-shell out to git.
+var proyectoCache sync.Map
+
+// deriveProyecto guesses a project name for a working directory. It asks git,
+// which resolves worktrees, submodules and separate git dirs correctly:
+//  1. the origin remote's repo name (last URL segment, without a trailing .git);
+//  2. otherwise the basename of the repository toplevel;
+//  3. otherwise (not a git dir, or git missing) the basename of dir itself.
 func deriveProyecto(dir string) string {
 	if dir == "" {
 		return ""
 	}
-	root := gitRoot(dir)
-	if root == "" {
-		return filepath.Base(dir)
+	if v, ok := proyectoCache.Load(dir); ok {
+		return v.(string)
 	}
-	if name := originRepoName(filepath.Join(root, ".git", "config")); name != "" {
-		return name
-	}
-	return filepath.Base(root)
+	name := computeProyecto(dir)
+	proyectoCache.Store(dir, name)
+	return name
 }
 
-// gitRoot walks up from dir until it finds a directory containing .git.
-func gitRoot(dir string) string {
-	cur := dir
-	for {
-		if fi, err := os.Stat(filepath.Join(cur, ".git")); err == nil {
-			_ = fi
-			return cur
+func computeProyecto(dir string) string {
+	if url := gitOutput(dir, "remote", "get-url", "origin"); url != "" {
+		if name := repoNameFromURL(url); name != "" {
+			return name
 		}
-		parent := filepath.Dir(cur)
-		if parent == cur {
-			return ""
-		}
-		cur = parent
 	}
+	if top := gitOutput(dir, "rev-parse", "--show-toplevel"); top != "" {
+		return filepath.Base(top)
+	}
+	return filepath.Base(dir)
 }
 
-// originRepoName parses a git config file and returns the last path segment of
-// the [remote "origin"] url, without a trailing ".git". Returns "" if not found.
-func originRepoName(configPath string) string {
-	f, err := os.Open(configPath)
+// gitOutput runs `git -C <dir> <args...>` with a short timeout and returns the
+// trimmed stdout, or "" on any failure.
+func gitOutput(dir string, args ...string) string {
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	full := append([]string{"-C", dir}, args...)
+	out, err := exec.CommandContext(ctx, "git", full...).Output()
 	if err != nil {
 		return ""
 	}
-	defer f.Close()
-
-	inOrigin := false
-	sc := bufio.NewScanner(f)
-	for sc.Scan() {
-		line := strings.TrimSpace(sc.Text())
-		if strings.HasPrefix(line, "[") {
-			inOrigin = strings.EqualFold(line, `[remote "origin"]`)
-			continue
-		}
-		if !inOrigin {
-			continue
-		}
-		if !strings.HasPrefix(line, "url") {
-			continue
-		}
-		eq := strings.IndexByte(line, '=')
-		if eq < 0 {
-			continue
-		}
-		return repoNameFromURL(strings.TrimSpace(line[eq+1:]))
-	}
-	return ""
+	return strings.TrimSpace(string(out))
 }
 
 // repoNameFromURL turns a git remote URL into its bare repo name.

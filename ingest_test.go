@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"testing"
 	"time"
@@ -130,8 +131,25 @@ func TestIngestOpencode(t *testing.T) {
 	}
 }
 
+func gitCmd(t *testing.T, dir string, args ...string) {
+	t.Helper()
+	c := exec.Command("git", args...)
+	c.Dir = dir
+	c.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=t", "GIT_AUTHOR_EMAIL=t@t",
+		"GIT_COMMITTER_NAME=t", "GIT_COMMITTER_EMAIL=t@t",
+	)
+	if out, err := c.CombinedOutput(); err != nil {
+		t.Fatalf("git %v: %v\n%s", args, err, out)
+	}
+}
+
 func TestDeriveProyecto(t *testing.T) {
-	// (a) plain dir -> basename
+	if _, err := exec.LookPath("git"); err != nil {
+		t.Skip("git not available")
+	}
+
+	// (a) plain non-git dir -> its basename
 	plain := filepath.Join(t.TempDir(), "some-folder")
 	if err := os.MkdirAll(plain, 0755); err != nil {
 		t.Fatal(err)
@@ -140,38 +158,48 @@ func TestDeriveProyecto(t *testing.T) {
 		t.Errorf("plain dir: got %q, want some-folder", got)
 	}
 
-	// (b) git root with origin remote -> repo name from url
-	root := filepath.Join(t.TempDir(), "checkout")
-	gitDir := filepath.Join(root, ".git")
-	if err := os.MkdirAll(gitDir, 0755); err != nil {
+	// (b) git repo with an origin remote -> repo name from the URL
+	base := t.TempDir()
+	repo := filepath.Join(base, "checkout")
+	if err := os.MkdirAll(repo, 0755); err != nil {
 		t.Fatal(err)
 	}
-	cfg := "[core]\n\trepositoryformatversion = 0\n[remote \"origin\"]\n\turl = git@github.com:foo/my-repo.git\n\tfetch = +refs/heads/*:refs/remotes/origin/*\n"
-	if err := os.WriteFile(filepath.Join(gitDir, "config"), []byte(cfg), 0644); err != nil {
+	gitCmd(t, repo, "init", "-b", "main")
+	gitCmd(t, repo, "remote", "add", "origin", "git@github.com:foo/my-repo.git")
+	if err := os.WriteFile(filepath.Join(repo, "f.txt"), []byte("x"), 0644); err != nil {
 		t.Fatal(err)
 	}
-	if got := deriveProyecto(root); got != "my-repo" {
-		t.Errorf("git root: got %q, want my-repo", got)
-	}
+	gitCmd(t, repo, "add", ".")
+	gitCmd(t, repo, "commit", "-m", "init")
 
-	// (c) nested subdir under the git root -> still my-repo
-	nested := filepath.Join(root, "pkg", "deep")
+	if got := deriveProyecto(repo); got != "my-repo" {
+		t.Errorf("git repo with remote: got %q, want my-repo", got)
+	}
+	nested := filepath.Join(repo, "pkg", "deep")
 	if err := os.MkdirAll(nested, 0755); err != nil {
 		t.Fatal(err)
 	}
 	if got := deriveProyecto(nested); got != "my-repo" {
-		t.Errorf("nested subdir: got %q, want my-repo", got)
+		t.Errorf("nested subdir of repo: got %q, want my-repo", got)
 	}
 
-	// (d) git root without a usable remote -> basename of root
-	root2 := filepath.Join(t.TempDir(), "barerepo")
-	if err := os.MkdirAll(filepath.Join(root2, ".git"), 0755); err != nil {
+	// (c) regression: a linked worktree, where <dir>/.git is a FILE, not a dir
+	wt := filepath.Join(base, "my-repo-worktrees", "feature-x")
+	if err := os.MkdirAll(filepath.Dir(wt), 0755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(filepath.Join(root2, ".git", "config"), []byte("[core]\n"), 0644); err != nil {
+	gitCmd(t, repo, "worktree", "add", wt)
+	if got := deriveProyecto(wt); got != "my-repo" {
+		t.Errorf("worktree: got %q, want my-repo (this is the regression)", got)
+	}
+
+	// (d) git repo with no remote -> basename of the toplevel
+	noremote := filepath.Join(t.TempDir(), "barerepo")
+	if err := os.MkdirAll(noremote, 0755); err != nil {
 		t.Fatal(err)
 	}
-	if got := deriveProyecto(root2); got != "barerepo" {
+	gitCmd(t, noremote, "init", "-b", "main")
+	if got := deriveProyecto(noremote); got != "barerepo" {
 		t.Errorf("no remote: got %q, want barerepo", got)
 	}
 }
