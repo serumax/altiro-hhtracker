@@ -63,6 +63,8 @@ func main() {
 	}
 	defer db.Close()
 
+	cfg := loadConfig(home)
+
 	s := server.NewMCPServer("altiro-hhtracker", "0.1.0",
 		server.WithToolCapabilities(true),
 		server.WithInstructions(instructions),
@@ -74,7 +76,7 @@ func main() {
 			mcp.Description("Descripción breve del trabajo.")),
 		mcp.WithString("proyecto",
 			mcp.Description("Nombre del proyecto (default: general).")),
-	), hhStartHandler(db))
+	), withActivity(db, hhStartHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_close",
 		mcp.WithDescription("Cierra una entrada abierta y registra la duración total."),
@@ -82,17 +84,17 @@ func main() {
 			mcp.Description("ID de la entrada abierta a cerrar.")),
 		mcp.WithString("resumen",
 			mcp.Description("Resumen opcional del trabajo realizado.")),
-	), hhCloseHandler(db))
+	), withActivity(db, hhCloseHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_status",
 		mcp.WithDescription("Lista todas las entradas actualmente abiertas."),
-	), hhStatusHandler(db))
+	), withActivity(db, hhStatusHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_delete",
 		mcp.WithDescription("Borra una entrada por ID (abierta o cerrada)."),
 		mcp.WithNumber("entry_id", mcp.Required(),
 			mcp.Description("ID de la entrada a borrar.")),
-	), hhDeleteHandler(db))
+	), withActivity(db, hhDeleteHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_update",
 		mcp.WithDescription("Actualiza campos de una entrada existente. Solo se pasan los campos a cambiar."),
@@ -110,7 +112,7 @@ func main() {
 			mcp.Description("Nuevo resumen.")),
 		mcp.WithNumber("duracion_hh",
 			mcp.Description("Duración explícita en horas. Si se omite y hay inicio y fin, se recalcula.")),
-	), hhUpdateHandler(db))
+	), withActivity(db, hhUpdateHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_report",
 		mcp.WithDescription("Lista las entradas cerradas en un rango de fechas opcional."),
@@ -120,7 +122,7 @@ func main() {
 			mcp.Description("Fecha de fin YYYY-MM-DD (inclusive).")),
 		mcp.WithString("proyecto",
 			mcp.Description("Filtra por proyecto (opcional).")),
-	), hhReportHandler(db))
+	), withActivity(db, hhReportHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_manual",
 		mcp.WithDescription("Registra una entrada de tiempo manualmente."),
@@ -134,7 +136,7 @@ func main() {
 			mcp.Description("Duración en horas fraccionarias.")),
 		mcp.WithString("resumen",
 			mcp.Description("Resumen opcional.")),
-	), hhManualHandler(db))
+	), withActivity(db, hhManualHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_semana",
 		mcp.WithDescription("Reporte de horas de la semana."),
@@ -142,7 +144,7 @@ func main() {
 			mcp.Description("Desplazamiento de semana (0=esta semana, -1=semana pasada).")),
 		mcp.WithString("proyecto",
 			mcp.Description("Filtra por proyecto (opcional).")),
-	), hhSemanaHandler(db))
+	), withActivity(db, hhSemanaHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_mes",
 		mcp.WithDescription("Reporte de horas del mes."),
@@ -150,7 +152,9 @@ func main() {
 			mcp.Description("Desplazamiento de mes (0=este mes, -1=mes pasado).")),
 		mcp.WithString("proyecto",
 			mcp.Description("Filtra por proyecto (opcional).")),
-	), hhMesHandler(db))
+	), withActivity(db, hhMesHandler(db)))
+
+	startWorker(db, cfg)
 
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("ServeStdio: %v", err)
