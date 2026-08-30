@@ -174,3 +174,84 @@ func TestDeriveProyecto(t *testing.T) {
 		t.Errorf("no remote: got %q, want barerepo", got)
 	}
 }
+
+func TestIngestClaude(t *testing.T) {
+	db := openTestDB(t)
+	projects := t.TempDir()
+	slug := filepath.Join(projects, "-Users-me-proj")
+	if err := os.MkdirAll(slug, 0755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(slug, "sess.jsonl")
+
+	lines := []string{
+		`{"type":"user","uuid":"u0","timestamp":"2026-08-30T18:59:14.881Z","cwd":"/Users/me/proj"}`,
+		`{"type":"assistant","uuid":"a1","timestamp":"2026-08-30T18:59:19.881Z","cwd":"/Users/me/proj","message":{"model":"claude-sonnet-5","usage":{"input_tokens":2,"output_tokens":84,"cache_creation_input_tokens":9261,"cache_read_input_tokens":138343,"output_tokens_details":{"thinking_tokens":8}}}}`,
+		`{"type":"assistant","uuid":"a1","timestamp":"2026-08-30T18:59:19.881Z","cwd":"/Users/me/proj","message":{"model":"claude-sonnet-5","usage":{"input_tokens":2,"output_tokens":84,"cache_creation_input_tokens":9261,"cache_read_input_tokens":138343}}}`,
+		`{"type":"assistant","uuid":"a2","timestamp":"2026-08-30T19:00:00.000Z","cwd":"/Users/me/proj","message":{"model":"claude-sonnet-5","usage":{"input_tokens":5,"output_tokens":5}}}`,
+		`{"type":"assistant","isSidechain":true,"uuid":"a3","timestamp":"2026-08-30T19:01:00.000Z","cwd":"/Users/me/proj","message":{"model":"claude-sonnet-5","usage":{"input_tokens":1,"output_tokens":1}}}`,
+	}
+	if err := os.WriteFile(f, []byte(joinLines(lines)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := ingestClaude(db, projects, time.Now())
+	if err != nil {
+		t.Fatalf("ingestClaude: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("expected 2 inserted, got %d", n)
+	}
+
+	var tin, tout, tcache int64
+	var din sql.NullFloat64
+	var cliente, source string
+	var costo float64
+	if err := db.QueryRow(`SELECT tokens_in, tokens_out, tokens_cache, duracion_s, cliente, source, costo_usd
+		FROM responses WHERE external_id='a1'`).Scan(&tin, &tout, &tcache, &din, &cliente, &source, &costo); err != nil {
+		t.Fatalf("scan a1: %v", err)
+	}
+	if tin != 2 || tout != 84 || tcache != 9261+138343 {
+		t.Errorf("a1 tokens = %d/%d/%d", tin, tout, tcache)
+	}
+	if !din.Valid || din.Float64 < 4.9 || din.Float64 > 5.1 {
+		t.Errorf("a1 duracion_s = %v, want ~5", din)
+	}
+	if cliente != "claude-code" || source != "claude-code" || costo != 0 {
+		t.Errorf("a1 meta = %q/%q/%v", cliente, source, costo)
+	}
+
+	// Re-run: nothing new.
+	n, err = ingestClaude(db, projects, time.Now())
+	if err != nil || n != 0 {
+		t.Fatalf("re-run: n=%d err=%v", n, err)
+	}
+
+	// Append one more assistant line, re-run -> exactly 1 new.
+	extra := "\n" + `{"type":"assistant","uuid":"a9","timestamp":"2026-08-30T19:05:00.000Z","cwd":"/Users/me/proj","message":{"model":"claude-sonnet-5","usage":{"input_tokens":3,"output_tokens":3}}}` + "\n"
+	fh, err := os.OpenFile(f, os.O_APPEND|os.O_WRONLY, 0644)
+	if err != nil {
+		t.Fatal(err)
+	}
+	fh.WriteString(extra)
+	fh.Close()
+
+	n, err = ingestClaude(db, projects, time.Now())
+	if err != nil || n != 1 {
+		t.Fatalf("after append: n=%d err=%v", n, err)
+	}
+
+	// Missing dir -> 0, nil.
+	n, err = ingestClaude(db, filepath.Join(t.TempDir(), "nope"), time.Now())
+	if err != nil || n != 0 {
+		t.Fatalf("missing dir: n=%d err=%v", n, err)
+	}
+}
+
+func joinLines(lines []string) string {
+	out := ""
+	for _, l := range lines {
+		out += l + "\n"
+	}
+	return out
+}

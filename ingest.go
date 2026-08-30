@@ -233,3 +233,147 @@ func ingestOpencode(db *sql.DB, srcPath string, now time.Time) (int, error) {
 	}
 	return inserted, nil
 }
+
+// ---- Claude Code ingester ---------------------------------------------------
+
+type claudeLine struct {
+	Type        string `json:"type"`
+	UUID        string `json:"uuid"`
+	Timestamp   string `json:"timestamp"`
+	Cwd         string `json:"cwd"`
+	IsSidechain bool   `json:"isSidechain"`
+	Message     struct {
+		Model string `json:"model"`
+		Usage *struct {
+			InputTokens              int64 `json:"input_tokens"`
+			OutputTokens             int64 `json:"output_tokens"`
+			CacheCreationInputTokens int64 `json:"cache_creation_input_tokens"`
+			CacheReadInputTokens     int64 `json:"cache_read_input_tokens"`
+		} `json:"usage"`
+	} `json:"message"`
+}
+
+// ingestClaude scans Claude Code transcript files (*.jsonl) under projectsDir
+// for assistant responses. Each file keeps a byte-offset watermark so only the
+// bytes appended since the last run are parsed.
+func ingestClaude(db *sql.DB, projectsDir string, now time.Time) (int, error) {
+	if _, err := os.Stat(projectsDir); err != nil {
+		return 0, nil
+	}
+	files, err := filepath.Glob(filepath.Join(projectsDir, "*", "*.jsonl"))
+	if err != nil {
+		return 0, err
+	}
+
+	total := 0
+	for _, path := range files {
+		abs, err := filepath.Abs(path)
+		if err != nil {
+			abs = path
+		}
+		n, err := ingestClaudeFile(db, abs)
+		if err != nil {
+			return total, err
+		}
+		total += n
+	}
+	return total, nil
+}
+
+func ingestClaudeFile(db *sql.DB, path string) (int, error) {
+	source := "claude-code:" + path
+
+	var offset int64
+	if wm, err := getWatermark(db, source); err != nil {
+		return 0, err
+	} else if wm != "" {
+		offset, _ = strconv.ParseInt(wm, 10, 64)
+	}
+
+	f, err := os.Open(path)
+	if err != nil {
+		return 0, nil
+	}
+	defer f.Close()
+	if _, err := f.Seek(offset, 0); err != nil {
+		return 0, err
+	}
+
+	reader := bufio.NewReader(f)
+	consumed := offset
+	inserted := 0
+	var lastUser time.Time
+	var haveLastUser bool
+
+	for {
+		line, err := reader.ReadString('\n')
+		if err != nil {
+			// Incomplete trailing line: do not advance past it.
+			break
+		}
+		consumed += int64(len(line))
+
+		var cl claudeLine
+		if e := json.Unmarshal([]byte(strings.TrimSpace(line)), &cl); e != nil {
+			continue
+		}
+
+		if cl.Type == "user" && cl.Timestamp != "" {
+			if ts, e := time.Parse(time.RFC3339, cl.Timestamp); e == nil {
+				lastUser = ts
+				haveLastUser = true
+			}
+		}
+
+		if cl.Type != "assistant" || cl.Message.Model == "" || cl.Message.Usage == nil {
+			continue
+		}
+		if cl.IsSidechain {
+			continue
+		}
+
+		tsParsed, e := time.Parse(time.RFC3339, cl.Timestamp)
+		if e != nil {
+			continue
+		}
+
+		dur := sql.NullFloat64{}
+		if haveLastUser {
+			dur = sql.NullFloat64{Float64: tsParsed.Sub(lastUser).Seconds(), Valid: true}
+		}
+
+		entryID, err := singleOpenEntryID(db)
+		if err != nil {
+			return inserted, err
+		}
+
+		r := Response{
+			Ts:          tsParsed.Local().Format(tsLayout),
+			Proyecto:    deriveProyecto(cl.Cwd),
+			Cliente:     "claude-code",
+			Modelo:      cl.Message.Model,
+			DuracionS:   dur,
+			TokensIn:    cl.Message.Usage.InputTokens,
+			TokensOut:   cl.Message.Usage.OutputTokens,
+			TokensCache: cl.Message.Usage.CacheCreationInputTokens + cl.Message.Usage.CacheReadInputTokens,
+			CostoUSD:    0,
+			EntryID:     entryID,
+			Source:      "claude-code",
+			ExternalID:  cl.UUID,
+		}
+		ok, err := insertResponse(db, r)
+		if err != nil {
+			return inserted, err
+		}
+		if ok {
+			inserted++
+		}
+	}
+
+	if consumed != offset {
+		if err := setWatermark(db, source, strconv.FormatInt(consumed, 10)); err != nil {
+			return inserted, err
+		}
+	}
+	return inserted, nil
+}
