@@ -243,6 +243,7 @@ type claudeLine struct {
 	Cwd         string `json:"cwd"`
 	IsSidechain bool   `json:"isSidechain"`
 	Message     struct {
+		ID    string `json:"id"`
 		Model string `json:"model"`
 		Usage *struct {
 			InputTokens              int64 `json:"input_tokens"`
@@ -331,6 +332,13 @@ func ingestClaudeFile(db *sql.DB, path string) (int, error) {
 		if cl.IsSidechain {
 			continue
 		}
+		// Claude Code writes each assistant message several times with distinct
+		// line-level uuids but a stable message.id. Dedup on message.id so the
+		// UNIQUE(source, external_id) constraint collapses the copies and the
+		// first (earliest) occurrence's timestamp and tokens are the ones kept.
+		if cl.Message.ID == "" {
+			continue
+		}
 
 		tsParsed, e := time.Parse(time.RFC3339, cl.Timestamp)
 		if e != nil {
@@ -359,7 +367,7 @@ func ingestClaudeFile(db *sql.DB, path string) (int, error) {
 			CostoUSD:    0,
 			EntryID:     entryID,
 			Source:      "claude-code",
-			ExternalID:  cl.UUID,
+			ExternalID:  cl.Message.ID,
 		}
 		ok, err := insertResponse(db, r)
 		if err != nil {

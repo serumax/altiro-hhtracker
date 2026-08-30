@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -186,10 +187,11 @@ func TestIngestClaude(t *testing.T) {
 
 	lines := []string{
 		`{"type":"user","uuid":"u0","timestamp":"2026-08-30T18:59:14.881Z","cwd":"/Users/me/proj"}`,
-		`{"type":"assistant","uuid":"a1","timestamp":"2026-08-30T18:59:19.881Z","cwd":"/Users/me/proj","message":{"model":"claude-sonnet-5","usage":{"input_tokens":2,"output_tokens":84,"cache_creation_input_tokens":9261,"cache_read_input_tokens":138343,"output_tokens_details":{"thinking_tokens":8}}}}`,
-		`{"type":"assistant","uuid":"a1","timestamp":"2026-08-30T18:59:19.881Z","cwd":"/Users/me/proj","message":{"model":"claude-sonnet-5","usage":{"input_tokens":2,"output_tokens":84,"cache_creation_input_tokens":9261,"cache_read_input_tokens":138343}}}`,
-		`{"type":"assistant","uuid":"a2","timestamp":"2026-08-30T19:00:00.000Z","cwd":"/Users/me/proj","message":{"model":"claude-sonnet-5","usage":{"input_tokens":5,"output_tokens":5}}}`,
-		`{"type":"assistant","isSidechain":true,"uuid":"a3","timestamp":"2026-08-30T19:01:00.000Z","cwd":"/Users/me/proj","message":{"model":"claude-sonnet-5","usage":{"input_tokens":1,"output_tokens":1}}}`,
+		// Two copies of the same assistant message: different line uuid, SAME message.id.
+		`{"type":"assistant","uuid":"a1a","timestamp":"2026-08-30T18:59:19.881Z","cwd":"/Users/me/proj","message":{"id":"msg_01AA","model":"claude-sonnet-5","usage":{"input_tokens":2,"output_tokens":84,"cache_creation_input_tokens":9261,"cache_read_input_tokens":138343,"output_tokens_details":{"thinking_tokens":8}}}}`,
+		`{"type":"assistant","uuid":"a1b","timestamp":"2026-08-30T18:59:25.881Z","cwd":"/Users/me/proj","message":{"id":"msg_01AA","model":"claude-sonnet-5","usage":{"input_tokens":2,"output_tokens":84,"cache_creation_input_tokens":9261,"cache_read_input_tokens":138343}}}`,
+		`{"type":"assistant","uuid":"a2","timestamp":"2026-08-30T19:00:00.000Z","cwd":"/Users/me/proj","message":{"id":"msg_01BB","model":"claude-sonnet-5","usage":{"input_tokens":5,"output_tokens":5}}}`,
+		`{"type":"assistant","isSidechain":true,"uuid":"a3","timestamp":"2026-08-30T19:01:00.000Z","cwd":"/Users/me/proj","message":{"id":"msg_01SIDE","model":"claude-sonnet-5","usage":{"input_tokens":1,"output_tokens":1}}}`,
 	}
 	if err := os.WriteFile(f, []byte(joinLines(lines)), 0644); err != nil {
 		t.Fatal(err)
@@ -208,17 +210,24 @@ func TestIngestClaude(t *testing.T) {
 	var cliente, source string
 	var costo float64
 	if err := db.QueryRow(`SELECT tokens_in, tokens_out, tokens_cache, duracion_s, cliente, source, costo_usd
-		FROM responses WHERE external_id='a1'`).Scan(&tin, &tout, &tcache, &din, &cliente, &source, &costo); err != nil {
-		t.Fatalf("scan a1: %v", err)
+		FROM responses WHERE external_id='msg_01AA'`).Scan(&tin, &tout, &tcache, &din, &cliente, &source, &costo); err != nil {
+		t.Fatalf("scan msg_01AA: %v", err)
 	}
 	if tin != 2 || tout != 84 || tcache != 9261+138343 {
-		t.Errorf("a1 tokens = %d/%d/%d", tin, tout, tcache)
+		t.Errorf("msg_01AA tokens = in %d out %d cache %d", tin, tout, tcache)
 	}
 	if !din.Valid || din.Float64 < 4.9 || din.Float64 > 5.1 {
-		t.Errorf("a1 duracion_s = %v, want ~5", din)
+		t.Errorf("msg_01AA duracion_s = %v, want ~5 (first occurrence wins)", din)
 	}
 	if cliente != "claude-code" || source != "claude-code" || costo != 0 {
-		t.Errorf("a1 meta = %q/%q/%v", cliente, source, costo)
+		t.Errorf("msg_01AA meta = %q/%q/%v", cliente, source, costo)
+	}
+
+	// The two copies collapse to one row.
+	var rowsAA int
+	db.QueryRow(`SELECT COUNT(*) FROM responses WHERE external_id='msg_01AA'`).Scan(&rowsAA)
+	if rowsAA != 1 {
+		t.Fatalf("msg_01AA row count = %d, want 1", rowsAA)
 	}
 
 	// Re-run: nothing new.
@@ -228,7 +237,7 @@ func TestIngestClaude(t *testing.T) {
 	}
 
 	// Append one more assistant line, re-run -> exactly 1 new.
-	extra := "\n" + `{"type":"assistant","uuid":"a9","timestamp":"2026-08-30T19:05:00.000Z","cwd":"/Users/me/proj","message":{"model":"claude-sonnet-5","usage":{"input_tokens":3,"output_tokens":3}}}` + "\n"
+	extra := "\n" + `{"type":"assistant","uuid":"a9","timestamp":"2026-08-30T19:05:00.000Z","cwd":"/Users/me/proj","message":{"id":"msg_01CC","model":"claude-sonnet-5","usage":{"input_tokens":3,"output_tokens":3}}}` + "\n"
 	fh, err := os.OpenFile(f, os.O_APPEND|os.O_WRONLY, 0644)
 	if err != nil {
 		t.Fatal(err)
@@ -245,6 +254,46 @@ func TestIngestClaude(t *testing.T) {
 	n, err = ingestClaude(db, filepath.Join(t.TempDir(), "nope"), time.Now())
 	if err != nil || n != 0 {
 		t.Fatalf("missing dir: n=%d err=%v", n, err)
+	}
+}
+
+func TestIngestClaudeDedupByMessageID(t *testing.T) {
+	db := openTestDB(t)
+	projects := t.TempDir()
+	slug := filepath.Join(projects, "-Users-me-proj")
+	if err := os.MkdirAll(slug, 0755); err != nil {
+		t.Fatal(err)
+	}
+	f := filepath.Join(slug, "sess.jsonl")
+
+	dup := `{"type":"assistant","uuid":"%s","timestamp":"2026-08-30T20:00:0%d.000Z","cwd":"/Users/me/proj","message":{"id":"msg_01SAME","model":"claude-sonnet-5","usage":{"input_tokens":7,"output_tokens":11,"cache_creation_input_tokens":100,"cache_read_input_tokens":200}}}`
+	lines := []string{
+		fmt.Sprintf(dup, "x1", 1),
+		fmt.Sprintf(dup, "x2", 2),
+		fmt.Sprintf(dup, "x3", 3),
+		// No message.id -> skipped entirely (no uuid fallback).
+		`{"type":"assistant","uuid":"noid","timestamp":"2026-08-30T20:00:09.000Z","cwd":"/Users/me/proj","message":{"model":"claude-sonnet-5","usage":{"input_tokens":1,"output_tokens":1}}}`,
+	}
+	if err := os.WriteFile(f, []byte(joinLines(lines)), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := ingestClaude(db, projects, time.Now())
+	if err != nil {
+		t.Fatalf("ingestClaude: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("3 copies of one message.id + 1 id-less line: expected 1 inserted, got %d", n)
+	}
+
+	var count int
+	var tin, tout, tcache int64
+	if err := db.QueryRow(`SELECT COUNT(*), SUM(tokens_in), SUM(tokens_out), SUM(tokens_cache) FROM responses`).
+		Scan(&count, &tin, &tout, &tcache); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || tin != 7 || tout != 11 || tcache != 300 {
+		t.Fatalf("tokens counted more than once: count=%d in=%d out=%d cache=%d", count, tin, tout, tcache)
 	}
 }
 
