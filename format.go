@@ -57,6 +57,60 @@ func fmtDuracion(hh float64) string {
 	return fmt.Sprintf("%d HH %d min", h, m)
 }
 
+// ---- formatCostos --------------------------------------------------------
+
+// fmtSegundos renders a duration in seconds as a compact Spanish-friendly string.
+func fmtSegundos(s float64) string {
+	total := int(s + 0.5)
+	if total < 60 {
+		return fmt.Sprintf("%ds", total)
+	}
+	m := total / 60
+	rem := total % 60
+	if m < 60 {
+		return fmt.Sprintf("%dm %ds", m, rem)
+	}
+	h := m / 60
+	m = m % 60
+	return fmt.Sprintf("%dh %dm", h, m)
+}
+
+// formatCostos renders the cost report rows as a text table with a TOTAL line.
+func formatCostos(rows []CostRow) string {
+	if len(rows) == 0 {
+		return "Sin respuestas registradas en el rango."
+	}
+
+	var sb strings.Builder
+	sb.WriteString("💸 Costos por proyecto y modelo\n")
+	sb.WriteString(fmt.Sprintf("%-20s %-24s %8s  %-22s %10s  %10s\n",
+		"proyecto", "modelo", "nº resp", "tokens (in/out/cache)", "costo USD", "tiempo"))
+
+	var (
+		tResp             int64
+		tIn, tOut, tCache int64
+		tCost, tDur       float64
+	)
+	for _, r := range rows {
+		sb.WriteString(fmt.Sprintf("%-20s %-24s %8d  %-22s %10.4f  %10s\n",
+			r.Proyecto, r.Modelo, r.NumRespuestas,
+			fmt.Sprintf("%d/%d/%d", r.TokensIn, r.TokensOut, r.TokensCache),
+			r.CostoUSD, fmtSegundos(r.DuracionS)))
+		tResp += r.NumRespuestas
+		tIn += r.TokensIn
+		tOut += r.TokensOut
+		tCache += r.TokensCache
+		tCost += r.CostoUSD
+		tDur += r.DuracionS
+	}
+
+	sb.WriteString(fmt.Sprintf("%-20s %-24s %8d  %-22s %10.4f  %10s\n",
+		"TOTAL", "", tResp,
+		fmt.Sprintf("%d/%d/%d", tIn, tOut, tCache),
+		tCost, fmtSegundos(tDur)))
+	return sb.String()
+}
+
 // ---- reporte helper -------------------------------------------------------
 
 // reporte formats a list of closed entries for hh_semana and hh_mes output.

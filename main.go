@@ -154,6 +154,18 @@ func main() {
 			mcp.Description("Filtra por proyecto (opcional).")),
 	), withActivity(db, hhMesHandler(db)))
 
+	s.AddTool(mcp.NewTool("hh_costos",
+		mcp.WithDescription("Reporte de costo y tokens de respuestas de agentes, agrupado por proyecto y modelo."),
+		mcp.WithString("desde",
+			mcp.Description("Fecha de inicio YYYY-MM-DD (inclusive).")),
+		mcp.WithString("hasta",
+			mcp.Description("Fecha de fin YYYY-MM-DD (inclusive).")),
+		mcp.WithString("proyecto",
+			mcp.Description("Filtra por proyecto (opcional).")),
+		mcp.WithString("modelo",
+			mcp.Description("Filtra por modelo (opcional).")),
+	), withActivity(db, hhCostosHandler(db)))
+
 	startWorker(db, cfg)
 
 	if err := server.ServeStdio(s); err != nil {
@@ -390,6 +402,21 @@ func hhMesHandler(db *sql.DB) server.ToolHandlerFunc {
 		titulo := fmt.Sprintf("%s %d", mesNombre, first.Year())
 
 		return mcp.NewToolResultText(reporte(entries, titulo)), nil
+	}
+}
+
+func hhCostosHandler(db *sql.DB) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		desde := req.GetString("desde", "")
+		hasta := req.GetString("hasta", "")
+		proyecto := req.GetString("proyecto", "")
+		modelo := req.GetString("modelo", "")
+
+		rows, err := costReport(db, desde, hasta, proyecto, modelo)
+		if err != nil {
+			return mcp.NewToolResultText(fmt.Sprintf("ERROR: %v", err)), nil
+		}
+		return mcp.NewToolResultText(formatCostos(rows)), nil
 	}
 }
 

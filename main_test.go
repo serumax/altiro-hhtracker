@@ -466,3 +466,49 @@ func TestHhMes_WithClosedEntry(t *testing.T) {
 		t.Error("expected non-empty output from hh_mes after inserting entry")
 	}
 }
+
+// ---- hh_costos -----------------------------------------------------------
+
+func TestHhCostos_Empty(t *testing.T) {
+	db := newTestDB(t)
+	result, err := hhCostosHandler(db)(context.Background(), callReq(nil))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !strings.Contains(textOf(t, result), "Sin respuestas registradas") {
+		t.Errorf("expected empty message, got: %q", textOf(t, result))
+	}
+}
+
+func TestHhCostos_AggregatesAndTotals(t *testing.T) {
+	db := newTestDB(t)
+
+	seed := []Response{
+		{Ts: "2026-08-10T10:00:00.000000", Proyecto: "alpha", Cliente: "opencode", Modelo: "m1", TokensIn: 100, TokensOut: 200, TokensCache: 10, CostoUSD: 0.5, Source: "opencode", ExternalID: "1"},
+		{Ts: "2026-08-11T10:00:00.000000", Proyecto: "alpha", Cliente: "opencode", Modelo: "m1", TokensIn: 50, TokensOut: 50, TokensCache: 0, CostoUSD: 0.25, Source: "opencode", ExternalID: "2"},
+		{Ts: "2026-08-12T10:00:00.000000", Proyecto: "beta", Cliente: "claude-code", Modelo: "m2", TokensIn: 1, TokensOut: 1, TokensCache: 1, CostoUSD: 0, Source: "claude-code", ExternalID: "3"},
+	}
+	for _, r := range seed {
+		if _, err := insertResponse(db, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := hhCostosHandler(db)(context.Background(), callReq(nil))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	text := textOf(t, result)
+	for _, want := range []string{"alpha", "m1", "beta", "m2", "TOTAL", "0.75"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, text)
+		}
+	}
+
+	// proyecto filter
+	result, _ = hhCostosHandler(db)(context.Background(), callReq(map[string]any{"proyecto": "beta"}))
+	text = textOf(t, result)
+	if strings.Contains(text, "alpha") {
+		t.Errorf("proyecto filter leaked alpha: %s", text)
+	}
+}
