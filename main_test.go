@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -510,5 +511,53 @@ func TestHhCostos_AggregatesAndTotals(t *testing.T) {
 	text = textOf(t, result)
 	if strings.Contains(text, "alpha") {
 		t.Errorf("proyecto filter leaked alpha: %s", text)
+	}
+}
+
+// ---- init subcommand -----------------------------------------------------
+
+func TestDoInit_CreatesFileThenIdempotent(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "my-cool-repo")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	created, path, proyecto, err := doInit(root)
+	if err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+	if !created {
+		t.Error("first doInit: created=false, want true")
+	}
+	if path != filepath.Join(root, ".hh-tracker.md") {
+		t.Errorf("path = %q", path)
+	}
+	// No git, no parent marker => deriveProyecto returns the basename.
+	if proyecto != "my-cool-repo" {
+		t.Errorf("proyecto = %q, want my-cool-repo", proyecto)
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "proyecto: my-cool-repo") {
+		t.Errorf("file contents missing proyecto line:\n%s", b)
+	}
+	if !strings.Contains(string(b), "alias: []") {
+		t.Errorf("file contents missing alias line:\n%s", b)
+	}
+
+	// Second call: idempotent, no clobber.
+	created2, _, _, err := doInit(root)
+	if err != nil {
+		t.Fatalf("second doInit: %v", err)
+	}
+	if created2 {
+		t.Error("second doInit: created=true, want false")
+	}
+	b2, _ := os.ReadFile(path)
+	if string(b2) != string(b) {
+		t.Errorf("file bytes changed on second doInit:\nbefore=%q\nafter=%q", b, b2)
 	}
 }

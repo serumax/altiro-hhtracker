@@ -30,6 +30,9 @@ func main() {
 		case "install":
 			installCmd()
 			return
+		case "init":
+			initCmd()
+			return
 		case "version", "--version", "-v":
 			fmt.Println(versionLine())
 			return
@@ -433,11 +436,51 @@ func printHelp() {
 	fmt.Println()
 	fmt.Println("Subcomandos:")
 	fmt.Println("  install            Registra el servidor en Claude Code / OpenCode")
+	fmt.Println("  init               Crea .hh-tracker.md en la raíz del repo actual")
 	fmt.Println("  version|--version  Muestra la versión")
 	fmt.Println("  help|--help        Muestra esta ayuda")
 	fmt.Println()
 	fmt.Println("Tools MCP: hh_start, hh_close, hh_status, hh_delete, hh_update,")
-	fmt.Println("           hh_manual, hh_report, hh_semana, hh_mes")
+	fmt.Println("           hh_manual, hh_report, hh_semana, hh_mes, hh_costos")
+}
+
+// ---- init subcommand --------------------------------------------------------
+
+// doInit writes a starter .hh-tracker.md at root unless one already exists.
+// It never clobbers: created is false when the file is already there.
+func doInit(root string) (created bool, path string, proyecto string, err error) {
+	path = filepath.Join(root, projectFileName)
+	if _, statErr := os.Stat(path); statErr == nil {
+		return false, path, "", nil
+	}
+
+	proyecto = deriveProyecto(root)
+	content := fmt.Sprintf("---\nproyecto: %s\nalias: []\n---\n", proyecto)
+	if err = os.WriteFile(path, []byte(content), 0644); err != nil {
+		return false, path, proyecto, err
+	}
+	return true, path, proyecto, nil
+}
+
+// initCmd resolves the current git repo root and runs doInit against it.
+func initCmd() {
+	root, err := exec.Command("git", "-C", ".", "rev-parse", "--show-toplevel").Output()
+	rootStr := strings.TrimSpace(string(root))
+	if err != nil || rootStr == "" {
+		fmt.Fprintln(os.Stderr, "ERROR: no estás dentro de un repositorio git.")
+		os.Exit(1)
+	}
+
+	created, path, proyecto, err := doInit(rootStr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		os.Exit(1)
+	}
+	if created {
+		fmt.Printf("✓ creado %s (proyecto: %s) — edítalo si el nombre o los alias no calzan\n", path, proyecto)
+	} else {
+		fmt.Printf("ya existe: %s\n", path)
+	}
 }
 
 // ---- Install subcommand -------------------------------------------------------
