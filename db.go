@@ -22,6 +22,33 @@ CREATE TABLE IF NOT EXISTS entries (
 	duracion_hh REAL,
 	resumen     TEXT,
 	estado      TEXT    NOT NULL DEFAULT 'abierto'
+);
+
+CREATE TABLE IF NOT EXISTS responses (
+	id           INTEGER PRIMARY KEY AUTOINCREMENT,
+	ts           TEXT    NOT NULL,
+	proyecto     TEXT    NOT NULL,
+	cliente      TEXT    NOT NULL,
+	modelo       TEXT    NOT NULL,
+	duracion_s   REAL,
+	tokens_in    INTEGER NOT NULL DEFAULT 0,
+	tokens_out   INTEGER NOT NULL DEFAULT 0,
+	tokens_cache INTEGER NOT NULL DEFAULT 0,
+	costo_usd    REAL    NOT NULL DEFAULT 0,
+	entry_id     INTEGER,
+	source       TEXT    NOT NULL,
+	external_id  TEXT    NOT NULL,
+	UNIQUE(source, external_id)
+);
+
+CREATE TABLE IF NOT EXISTS ingest_state (
+	source     TEXT PRIMARY KEY,
+	watermark  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS meta (
+	key   TEXT PRIMARY KEY,
+	value TEXT NOT NULL
 );`
 
 // Entry mirrors one row in the entries table.
