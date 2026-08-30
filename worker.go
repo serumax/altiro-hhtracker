@@ -33,8 +33,9 @@ func computeIdleCloses(open []Entry, lastActivity map[int64]time.Time, now time.
 }
 
 // lastActivityFor returns the most recent activity timestamp known for an entry:
-// the max of its Inicio, the newest response ts for its proyecto, and the global
-// last_tool_call_at meta value.
+// the max of its Inicio, the newest ingested response ts (any proyecto — any
+// agent response means the machine is in use), and the global last_tool_call_at
+// meta value.
 func lastActivityFor(db *sql.DB, entry Entry) time.Time {
 	var best time.Time
 	consider := func(s string) {
@@ -50,7 +51,7 @@ func lastActivityFor(db *sql.DB, entry Entry) time.Time {
 
 	var respTS sql.NullString
 	if err := db.QueryRow(
-		`SELECT MAX(ts) FROM responses WHERE proyecto = ?`, entry.Proyecto,
+		`SELECT MAX(ts) FROM responses`,
 	).Scan(&respTS); err == nil && respTS.Valid {
 		consider(respTS.String)
 	}

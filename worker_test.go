@@ -57,6 +57,32 @@ func TestLastActivityForUsesMaxSignal(t *testing.T) {
 	}
 }
 
+func TestLastActivityForCountsAnyRecentResponse(t *testing.T) {
+	db := openTestDB(t)
+
+	res, err := db.Exec(`INSERT INTO entries (descripcion, proyecto, inicio, estado)
+		VALUES ('task', 'proj-x', '2026-08-30T09:00:00.000000', 'abierto')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	e, _ := getEntry(db, id)
+
+	// A response for a DIFFERENT proyecto still means the machine is active.
+	if _, err := insertResponse(db, Response{
+		Ts: "2026-08-30T11:30:00.000000", Proyecto: "unrelated-proj", Cliente: "opencode",
+		Modelo: "m", Source: "opencode", ExternalID: "r1",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got := lastActivityFor(db, e)
+	want, _ := parseTS("2026-08-30T11:30:00.000000")
+	if !got.Equal(want) {
+		t.Fatalf("lastActivityFor = %v, want %v (any recent response counts)", got, want)
+	}
+}
+
 func TestRunWorkerOnceClosesIdleAndIsIdempotent(t *testing.T) {
 	db := openTestDB(t)
 	cfg := loadConfig(t.TempDir())
