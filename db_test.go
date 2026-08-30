@@ -181,8 +181,9 @@ func TestOpenDBNewTables(t *testing.T) {
 		t.Fatalf("openDB: %v", err)
 	}
 
-	if _, err := db.Exec(`INSERT INTO responses (ts, proyecto, cliente, modelo, source, external_id)
-		VALUES ('2026-08-01T09:00:00.000000', 'p', 'claude-code', 'claude-sonnet-5', 'claude-code', 'abc')`); err != nil {
+	if _, err := db.Exec(`INSERT INTO responses
+		(ts, proyecto, cliente, modelo, tokens_cache_write, tokens_cache_read, source, external_id)
+		VALUES ('2026-08-01T09:00:00.000000', 'p', 'claude-code', 'claude-sonnet-5', 12, 34, 'claude-code', 'abc')`); err != nil {
 		t.Fatalf("insert responses: %v", err)
 	}
 	if _, err := db.Exec(`INSERT INTO ingest_state (source, watermark) VALUES ('opencode', '123')`); err != nil {

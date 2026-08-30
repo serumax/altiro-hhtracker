@@ -80,10 +80,10 @@ func TestIngestOpencode(t *testing.T) {
 
 	var modelo, proyecto, ts string
 	var din sql.NullFloat64
-	var tin, tout, tcache int64
+	var tin, tout, tcw, tcr int64
 	var costo float64
-	if err := db.QueryRow(`SELECT modelo, proyecto, ts, duracion_s, tokens_in, tokens_out, tokens_cache, costo_usd
-		FROM responses WHERE external_id='msg1'`).Scan(&modelo, &proyecto, &ts, &din, &tin, &tout, &tcache, &costo); err != nil {
+	if err := db.QueryRow(`SELECT modelo, proyecto, ts, duracion_s, tokens_in, tokens_out, tokens_cache_write, tokens_cache_read, costo_usd
+		FROM responses WHERE external_id='msg1'`).Scan(&modelo, &proyecto, &ts, &din, &tin, &tout, &tcw, &tcr, &costo); err != nil {
 		t.Fatalf("scan msg1: %v", err)
 	}
 	if modelo != "minimax/MiniMax-M3" {
@@ -95,8 +95,8 @@ func TestIngestOpencode(t *testing.T) {
 	if !din.Valid || din.Float64 < 66.2 || din.Float64 > 66.3 {
 		t.Errorf("duracion_s = %v, want ~66.25", din)
 	}
-	if tin != 10 || tout != 20 || tcache != 103 {
-		t.Errorf("tokens = %d/%d/%d, want 10/20/103", tin, tout, tcache)
+	if tin != 10 || tout != 20 || tcw != 3 || tcr != 100 {
+		t.Errorf("tokens = in %d out %d cw %d cr %d, want 10/20/3/100", tin, tout, tcw, tcr)
 	}
 	if costo != 0.02 {
 		t.Errorf("costo = %v", costo)
@@ -205,16 +205,16 @@ func TestIngestClaude(t *testing.T) {
 		t.Fatalf("expected 2 inserted, got %d", n)
 	}
 
-	var tin, tout, tcache int64
+	var tin, tout, tcw, tcr int64
 	var din sql.NullFloat64
 	var cliente, source string
 	var costo float64
-	if err := db.QueryRow(`SELECT tokens_in, tokens_out, tokens_cache, duracion_s, cliente, source, costo_usd
-		FROM responses WHERE external_id='msg_01AA'`).Scan(&tin, &tout, &tcache, &din, &cliente, &source, &costo); err != nil {
+	if err := db.QueryRow(`SELECT tokens_in, tokens_out, tokens_cache_write, tokens_cache_read, duracion_s, cliente, source, costo_usd
+		FROM responses WHERE external_id='msg_01AA'`).Scan(&tin, &tout, &tcw, &tcr, &din, &cliente, &source, &costo); err != nil {
 		t.Fatalf("scan msg_01AA: %v", err)
 	}
-	if tin != 2 || tout != 84 || tcache != 9261+138343 {
-		t.Errorf("msg_01AA tokens = in %d out %d cache %d", tin, tout, tcache)
+	if tin != 2 || tout != 84 || tcw != 9261 || tcr != 138343 {
+		t.Errorf("msg_01AA tokens = in %d out %d cw %d cr %d", tin, tout, tcw, tcr)
 	}
 	if !din.Valid || din.Float64 < 4.9 || din.Float64 > 5.1 {
 		t.Errorf("msg_01AA duracion_s = %v, want ~5 (first occurrence wins)", din)
@@ -287,13 +287,13 @@ func TestIngestClaudeDedupByMessageID(t *testing.T) {
 	}
 
 	var count int
-	var tin, tout, tcache int64
-	if err := db.QueryRow(`SELECT COUNT(*), SUM(tokens_in), SUM(tokens_out), SUM(tokens_cache) FROM responses`).
-		Scan(&count, &tin, &tout, &tcache); err != nil {
+	var tin, tout, tcw, tcr int64
+	if err := db.QueryRow(`SELECT COUNT(*), SUM(tokens_in), SUM(tokens_out), SUM(tokens_cache_write), SUM(tokens_cache_read) FROM responses`).
+		Scan(&count, &tin, &tout, &tcw, &tcr); err != nil {
 		t.Fatal(err)
 	}
-	if count != 1 || tin != 7 || tout != 11 || tcache != 300 {
-		t.Fatalf("tokens counted more than once: count=%d in=%d out=%d cache=%d", count, tin, tout, tcache)
+	if count != 1 || tin != 7 || tout != 11 || tcw != 100 || tcr != 200 {
+		t.Fatalf("tokens counted more than once: count=%d in=%d out=%d cw=%d cr=%d", count, tin, tout, tcw, tcr)
 	}
 }
 

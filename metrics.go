@@ -6,18 +6,19 @@ import (
 
 // Response mirrors one row in the responses table.
 type Response struct {
-	Ts          string
-	Proyecto    string
-	Cliente     string
-	Modelo      string
-	DuracionS   sql.NullFloat64
-	TokensIn    int64
-	TokensOut   int64
-	TokensCache int64
-	CostoUSD    float64
-	EntryID     sql.NullInt64
-	Source      string
-	ExternalID  string
+	Ts               string
+	Proyecto         string
+	Cliente          string
+	Modelo           string
+	DuracionS        sql.NullFloat64
+	TokensIn         int64
+	TokensOut        int64
+	TokensCacheWrite int64
+	TokensCacheRead  int64
+	CostoUSD         float64
+	EntryID          sql.NullInt64
+	Source           string
+	ExternalID       string
 }
 
 // CostRow is one aggregated (proyecto, modelo) group from costReport.
@@ -26,7 +27,8 @@ type CostRow struct {
 	Modelo        string
 	TokensIn      int64
 	TokensOut     int64
-	TokensCache   int64
+	SumCacheWrite int64
+	SumCacheRead  int64
 	CostoUSD      float64
 	NumRespuestas int64
 	DuracionS     float64
@@ -38,11 +40,11 @@ func insertResponse(db *sql.DB, r Response) (inserted bool, err error) {
 	res, err := db.Exec(
 		`INSERT INTO responses
 		   (ts, proyecto, cliente, modelo, duracion_s, tokens_in, tokens_out,
-		    tokens_cache, costo_usd, entry_id, source, external_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		    tokens_cache_write, tokens_cache_read, costo_usd, entry_id, source, external_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(source, external_id) DO NOTHING`,
 		r.Ts, r.Proyecto, r.Cliente, r.Modelo, r.DuracionS,
-		r.TokensIn, r.TokensOut, r.TokensCache, r.CostoUSD,
+		r.TokensIn, r.TokensOut, r.TokensCacheWrite, r.TokensCacheRead, r.CostoUSD,
 		r.EntryID, r.Source, r.ExternalID,
 	)
 	if err != nil {
@@ -124,7 +126,8 @@ func singleOpenEntryID(db *sql.DB) (sql.NullInt64, error) {
 // filtered by a DATE(ts) range and by proyecto / modelo.
 func costReport(db *sql.DB, desde, hasta, proyecto, modelo string) ([]CostRow, error) {
 	q := `SELECT proyecto, modelo,
-	             SUM(tokens_in), SUM(tokens_out), SUM(tokens_cache),
+	             SUM(tokens_in), SUM(tokens_out),
+	             SUM(tokens_cache_write), SUM(tokens_cache_read),
 	             SUM(costo_usd), COUNT(*), COALESCE(SUM(duracion_s), 0)
 	      FROM responses WHERE 1=1`
 	var args []interface{}
@@ -156,7 +159,7 @@ func costReport(db *sql.DB, desde, hasta, proyecto, modelo string) ([]CostRow, e
 	for rows.Next() {
 		var c CostRow
 		if err := rows.Scan(&c.Proyecto, &c.Modelo, &c.TokensIn, &c.TokensOut,
-			&c.TokensCache, &c.CostoUSD, &c.NumRespuestas, &c.DuracionS); err != nil {
+			&c.SumCacheWrite, &c.SumCacheRead, &c.CostoUSD, &c.NumRespuestas, &c.DuracionS); err != nil {
 			return nil, err
 		}
 		out = append(out, c)

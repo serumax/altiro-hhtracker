@@ -7,18 +7,19 @@ import (
 
 func sampleResponse() Response {
 	return Response{
-		Ts:          "2026-08-30T10:00:00.000000",
-		Proyecto:    "hh-tracker",
-		Cliente:     "opencode",
-		Modelo:      "minimax/MiniMax-M3",
-		DuracionS:   sql.NullFloat64{Float64: 12.5, Valid: true},
-		TokensIn:    100,
-		TokensOut:   200,
-		TokensCache: 50,
-		CostoUSD:    0.01,
-		EntryID:     sql.NullInt64{},
-		Source:      "opencode",
-		ExternalID:  "msg-1",
+		Ts:               "2026-08-30T10:00:00.000000",
+		Proyecto:         "hh-tracker",
+		Cliente:          "opencode",
+		Modelo:           "minimax/MiniMax-M3",
+		DuracionS:        sql.NullFloat64{Float64: 12.5, Valid: true},
+		TokensIn:         100,
+		TokensOut:        200,
+		TokensCacheWrite: 20,
+		TokensCacheRead:  30,
+		CostoUSD:         0.01,
+		EntryID:          sql.NullInt64{},
+		Source:           "opencode",
+		ExternalID:       "msg-1",
 	}
 }
 
@@ -46,14 +47,14 @@ func TestInsertResponseInsertsOnceThenDedup(t *testing.T) {
 		t.Fatalf("expected 1 row, got %d (err %v)", n, err)
 	}
 
-	var tin, tout, tcache int64
+	var tin, tout, tcw, tcr int64
 	var costo float64
-	if err := db.QueryRow(`SELECT tokens_in, tokens_out, tokens_cache, costo_usd FROM responses`).
-		Scan(&tin, &tout, &tcache, &costo); err != nil {
+	if err := db.QueryRow(`SELECT tokens_in, tokens_out, tokens_cache_write, tokens_cache_read, costo_usd FROM responses`).
+		Scan(&tin, &tout, &tcw, &tcr, &costo); err != nil {
 		t.Fatalf("scan: %v", err)
 	}
-	if tin != 100 || tout != 200 || tcache != 50 || costo != 0.01 {
-		t.Fatalf("stored fields wrong: %d %d %d %v", tin, tout, tcache, costo)
+	if tin != 100 || tout != 200 || tcw != 20 || tcr != 30 || costo != 0.01 {
+		t.Fatalf("stored fields wrong: in=%d out=%d cw=%d cr=%d costo=%v", tin, tout, tcw, tcr, costo)
 	}
 }
 
@@ -130,10 +131,10 @@ func TestCostReportAggregates(t *testing.T) {
 	db := openTestDB(t)
 
 	rows := []Response{
-		{Ts: "2026-08-10T10:00:00.000000", Proyecto: "a", Cliente: "opencode", Modelo: "m1", TokensIn: 10, TokensOut: 20, TokensCache: 1, CostoUSD: 0.5, DuracionS: sql.NullFloat64{Float64: 3, Valid: true}, Source: "opencode", ExternalID: "1"},
-		{Ts: "2026-08-11T10:00:00.000000", Proyecto: "a", Cliente: "opencode", Modelo: "m1", TokensIn: 5, TokensOut: 5, TokensCache: 0, CostoUSD: 0.25, DuracionS: sql.NullFloat64{Float64: 2, Valid: true}, Source: "opencode", ExternalID: "2"},
-		{Ts: "2026-08-12T10:00:00.000000", Proyecto: "b", Cliente: "claude-code", Modelo: "m2", TokensIn: 1, TokensOut: 1, TokensCache: 1, CostoUSD: 0, Source: "claude-code", ExternalID: "3"},
-		{Ts: "2026-07-01T10:00:00.000000", Proyecto: "a", Cliente: "opencode", Modelo: "m1", TokensIn: 999, TokensOut: 999, TokensCache: 999, CostoUSD: 9, Source: "opencode", ExternalID: "4"},
+		{Ts: "2026-08-10T10:00:00.000000", Proyecto: "a", Cliente: "opencode", Modelo: "m1", TokensIn: 10, TokensOut: 20, TokensCacheWrite: 1, TokensCacheRead: 2, CostoUSD: 0.5, DuracionS: sql.NullFloat64{Float64: 3, Valid: true}, Source: "opencode", ExternalID: "1"},
+		{Ts: "2026-08-11T10:00:00.000000", Proyecto: "a", Cliente: "opencode", Modelo: "m1", TokensIn: 5, TokensOut: 5, TokensCacheWrite: 0, TokensCacheRead: 4, CostoUSD: 0.25, DuracionS: sql.NullFloat64{Float64: 2, Valid: true}, Source: "opencode", ExternalID: "2"},
+		{Ts: "2026-08-12T10:00:00.000000", Proyecto: "b", Cliente: "claude-code", Modelo: "m2", TokensIn: 1, TokensOut: 1, TokensCacheWrite: 1, TokensCacheRead: 1, CostoUSD: 0, Source: "claude-code", ExternalID: "3"},
+		{Ts: "2026-07-01T10:00:00.000000", Proyecto: "a", Cliente: "opencode", Modelo: "m1", TokensIn: 999, TokensOut: 999, TokensCacheWrite: 999, TokensCacheRead: 999, CostoUSD: 9, Source: "opencode", ExternalID: "4"},
 	}
 	for _, r := range rows {
 		if _, err := insertResponse(db, r); err != nil {
@@ -152,7 +153,8 @@ func TestCostReportAggregates(t *testing.T) {
 	if got[0].Proyecto != "a" || got[0].Modelo != "m1" {
 		t.Fatalf("group 0 = %+v", got[0])
 	}
-	if got[0].NumRespuestas != 2 || got[0].TokensIn != 15 || got[0].TokensOut != 25 || got[0].TokensCache != 1 {
+	if got[0].NumRespuestas != 2 || got[0].TokensIn != 15 || got[0].TokensOut != 25 ||
+		got[0].SumCacheWrite != 1 || got[0].SumCacheRead != 6 {
 		t.Fatalf("group a/m1 aggregate wrong: %+v", got[0])
 	}
 	if got[0].CostoUSD != 0.75 || got[0].DuracionS != 5 {

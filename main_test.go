@@ -484,9 +484,9 @@ func TestHhCostos_AggregatesAndTotals(t *testing.T) {
 	db := newTestDB(t)
 
 	seed := []Response{
-		{Ts: "2026-08-10T10:00:00.000000", Proyecto: "alpha", Cliente: "opencode", Modelo: "m1", TokensIn: 100, TokensOut: 200, TokensCache: 10, CostoUSD: 0.5, Source: "opencode", ExternalID: "1"},
-		{Ts: "2026-08-11T10:00:00.000000", Proyecto: "alpha", Cliente: "opencode", Modelo: "m1", TokensIn: 50, TokensOut: 50, TokensCache: 0, CostoUSD: 0.25, Source: "opencode", ExternalID: "2"},
-		{Ts: "2026-08-12T10:00:00.000000", Proyecto: "beta", Cliente: "claude-code", Modelo: "m2", TokensIn: 1, TokensOut: 1, TokensCache: 1, CostoUSD: 0, Source: "claude-code", ExternalID: "3"},
+		{Ts: "2026-08-10T10:00:00.000000", Proyecto: "alpha", Cliente: "opencode", Modelo: "m1", TokensIn: 100, TokensOut: 200, TokensCacheWrite: 4, TokensCacheRead: 6, CostoUSD: 0.5, Source: "opencode", ExternalID: "1"},
+		{Ts: "2026-08-11T10:00:00.000000", Proyecto: "alpha", Cliente: "opencode", Modelo: "m1", TokensIn: 50, TokensOut: 50, TokensCacheWrite: 0, TokensCacheRead: 0, CostoUSD: 0.25, Source: "opencode", ExternalID: "2"},
+		{Ts: "2026-08-12T10:00:00.000000", Proyecto: "beta", Cliente: "claude-code", Modelo: "m2", TokensIn: 1, TokensOut: 1, TokensCacheWrite: 1, TokensCacheRead: 1, CostoUSD: 0, Source: "claude-code", ExternalID: "3"},
 	}
 	for _, r := range seed {
 		if _, err := insertResponse(db, r); err != nil {

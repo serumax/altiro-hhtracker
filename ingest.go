@@ -201,18 +201,19 @@ func ingestOpencode(db *sql.DB, srcPath string, now time.Time) (int, error) {
 		}
 
 		r := Response{
-			Ts:          time.UnixMilli(m.Time.Completed).Local().Format(tsLayout),
-			Proyecto:    proyecto,
-			Cliente:     "opencode",
-			Modelo:      modelo,
-			DuracionS:   sql.NullFloat64{Float64: float64(m.Time.Completed-m.Time.Created) / 1000.0, Valid: true},
-			TokensIn:    m.Tokens.Input,
-			TokensOut:   m.Tokens.Output,
-			TokensCache: m.Tokens.Cache.Read + m.Tokens.Cache.Write,
-			CostoUSD:    m.Cost,
-			EntryID:     entryID,
-			Source:      "opencode",
-			ExternalID:  id,
+			Ts:               time.UnixMilli(m.Time.Completed).Local().Format(tsLayout),
+			Proyecto:         proyecto,
+			Cliente:          "opencode",
+			Modelo:           modelo,
+			DuracionS:        sql.NullFloat64{Float64: float64(m.Time.Completed-m.Time.Created) / 1000.0, Valid: true},
+			TokensIn:         m.Tokens.Input,
+			TokensOut:        m.Tokens.Output,
+			TokensCacheWrite: m.Tokens.Cache.Write,
+			TokensCacheRead:  m.Tokens.Cache.Read,
+			CostoUSD:         m.Cost,
+			EntryID:          entryID,
+			Source:           "opencode",
+			ExternalID:       id,
 		}
 		ok, err := insertResponse(db, r)
 		if err != nil {
@@ -356,18 +357,19 @@ func ingestClaudeFile(db *sql.DB, path string) (int, error) {
 		}
 
 		r := Response{
-			Ts:          tsParsed.Local().Format(tsLayout),
-			Proyecto:    deriveProyecto(cl.Cwd),
-			Cliente:     "claude-code",
-			Modelo:      cl.Message.Model,
-			DuracionS:   dur,
-			TokensIn:    cl.Message.Usage.InputTokens,
-			TokensOut:   cl.Message.Usage.OutputTokens,
-			TokensCache: cl.Message.Usage.CacheCreationInputTokens + cl.Message.Usage.CacheReadInputTokens,
-			CostoUSD:    0,
-			EntryID:     entryID,
-			Source:      "claude-code",
-			ExternalID:  cl.Message.ID,
+			Ts:               tsParsed.Local().Format(tsLayout),
+			Proyecto:         deriveProyecto(cl.Cwd),
+			Cliente:          "claude-code",
+			Modelo:           cl.Message.Model,
+			DuracionS:        dur,
+			TokensIn:         cl.Message.Usage.InputTokens,
+			TokensOut:        cl.Message.Usage.OutputTokens,
+			TokensCacheWrite: cl.Message.Usage.CacheCreationInputTokens,
+			TokensCacheRead:  cl.Message.Usage.CacheReadInputTokens,
+			CostoUSD:         0,
+			EntryID:          entryID,
+			Source:           "claude-code",
+			ExternalID:       cl.Message.ID,
 		}
 		ok, err := insertResponse(db, r)
 		if err != nil {

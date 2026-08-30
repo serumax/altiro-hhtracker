@@ -83,32 +83,47 @@ func formatCostos(rows []CostRow) string {
 
 	var sb strings.Builder
 	sb.WriteString("💸 Costos por proyecto y modelo\n")
-	sb.WriteString(fmt.Sprintf("%-20s %-24s %8s  %-22s %10s  %10s\n",
-		"proyecto", "modelo", "nº resp", "tokens (in/out/cache)", "costo USD", "tiempo"))
+	sb.WriteString(fmt.Sprintf("%-20s %-24s %8s  %-18s %-16s %10s  %10s\n",
+		"proyecto", "modelo", "nº resp", "tokens in/out", "cache w/r", "costo USD", "tiempo"))
 
 	var (
-		tResp             int64
-		tIn, tOut, tCache int64
-		tCost, tDur       float64
+		tResp                       int64
+		tIn, tOut, tCacheW, tCacheR int64
+		tCost, tDur                 float64
 	)
+	line := func(proyecto, modelo string, resp, in, out, cw, cr int64, cost, dur float64) {
+		sb.WriteString(fmt.Sprintf("%-20s %-24s %8d  %-18s %-16s %10.4f  %10s\n",
+			proyecto, modelo, resp,
+			fmt.Sprintf("%s/%s", fmtTokens(in), fmtTokens(out)),
+			fmt.Sprintf("%s / %s", fmtTokens(cw), fmtTokens(cr)),
+			cost, fmtSegundos(dur)))
+	}
 	for _, r := range rows {
-		sb.WriteString(fmt.Sprintf("%-20s %-24s %8d  %-22s %10.4f  %10s\n",
-			r.Proyecto, r.Modelo, r.NumRespuestas,
-			fmt.Sprintf("%d/%d/%d", r.TokensIn, r.TokensOut, r.TokensCache),
-			r.CostoUSD, fmtSegundos(r.DuracionS)))
+		line(r.Proyecto, r.Modelo, r.NumRespuestas, r.TokensIn, r.TokensOut,
+			r.SumCacheWrite, r.SumCacheRead, r.CostoUSD, r.DuracionS)
 		tResp += r.NumRespuestas
 		tIn += r.TokensIn
 		tOut += r.TokensOut
-		tCache += r.TokensCache
+		tCacheW += r.SumCacheWrite
+		tCacheR += r.SumCacheRead
 		tCost += r.CostoUSD
 		tDur += r.DuracionS
 	}
 
-	sb.WriteString(fmt.Sprintf("%-20s %-24s %8d  %-22s %10.4f  %10s\n",
-		"TOTAL", "", tResp,
-		fmt.Sprintf("%d/%d/%d", tIn, tOut, tCache),
-		tCost, fmtSegundos(tDur)))
+	line("TOTAL", "", tResp, tIn, tOut, tCacheW, tCacheR, tCost, tDur)
 	return sb.String()
+}
+
+// fmtTokens renders a token count compactly (1234 -> "1.2k", 4100000 -> "4.1M").
+func fmtTokens(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
 }
 
 // ---- reporte helper -------------------------------------------------------
