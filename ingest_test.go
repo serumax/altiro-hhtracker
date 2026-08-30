@@ -332,3 +332,94 @@ func joinLines(lines []string) string {
 	}
 	return out
 }
+
+func TestIngestOpencodeUsesProjectFile(t *testing.T) {
+	db := openTestDB(t)
+
+	// A working dir pinned by a .hh-tracker.md canonical name.
+	workdir := filepath.Join(t.TempDir(), "api-demo")
+	if err := os.MkdirAll(workdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, ".hh-tracker.md"),
+		[]byte("---\nproyecto: canon\n---\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	src := filepath.Join(t.TempDir(), "opencode.db")
+	s, err := sql.Open("sqlite", src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, stmt := range []string{
+		`CREATE TABLE project (id TEXT PRIMARY KEY, name TEXT, worktree TEXT)`,
+		`CREATE TABLE session (id TEXT PRIMARY KEY, project_id TEXT, directory TEXT)`,
+		`CREATE TABLE message (id TEXT PRIMARY KEY, session_id TEXT, time_created INT, time_updated INT, data TEXT)`,
+	} {
+		if _, err := s.Exec(stmt); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// No project name -> derivation falls to the session directory.
+	if _, err := s.Exec(`INSERT INTO session (id, project_id, directory) VALUES ('s1', NULL, ?)`, workdir); err != nil {
+		t.Fatal(err)
+	}
+	data := `{"role":"assistant","path":{"cwd":"` + workdir + `"},"cost":0,` +
+		`"tokens":{"input":1,"output":1,"cache":{"read":0,"write":0}},` +
+		`"modelID":"m","providerID":"p",` +
+		`"time":{"created":1788115499779,"completed":1788115500779}}`
+	if _, err := s.Exec(`INSERT INTO message (id, session_id, time_created, data) VALUES ('mid', 's1', 1, ?)`, data); err != nil {
+		t.Fatal(err)
+	}
+	s.Close()
+
+	n, err := ingestOpencode(db, src, time.Now())
+	if err != nil || n != 1 {
+		t.Fatalf("ingestOpencode: n=%d err=%v", n, err)
+	}
+
+	var proyecto string
+	if err := db.QueryRow(`SELECT proyecto FROM responses WHERE external_id='mid'`).Scan(&proyecto); err != nil {
+		t.Fatal(err)
+	}
+	if proyecto != "canon" {
+		t.Errorf("proyecto = %q, want canon (from .hh-tracker.md)", proyecto)
+	}
+}
+
+func TestIngestClaudeUsesProjectFile(t *testing.T) {
+	db := openTestDB(t)
+
+	workdir := filepath.Join(t.TempDir(), "api-demo")
+	if err := os.MkdirAll(workdir, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workdir, ".hh-tracker.md"),
+		[]byte("---\nproyecto: canon\n---\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	projects := t.TempDir()
+	slug := filepath.Join(projects, "-slug")
+	if err := os.MkdirAll(slug, 0755); err != nil {
+		t.Fatal(err)
+	}
+	line := `{"type":"assistant","uuid":"u","timestamp":"2026-08-30T20:00:00.000Z","cwd":"` + workdir +
+		`","message":{"id":"msg_01ZZ","model":"claude-sonnet-5","usage":{"input_tokens":1,"output_tokens":1}}}` + "\n"
+	if err := os.WriteFile(filepath.Join(slug, "s.jsonl"), []byte(line), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	n, err := ingestClaude(db, projects, time.Now())
+	if err != nil || n != 1 {
+		t.Fatalf("ingestClaude: n=%d err=%v", n, err)
+	}
+
+	var proyecto string
+	if err := db.QueryRow(`SELECT proyecto FROM responses WHERE external_id='msg_01ZZ'`).Scan(&proyecto); err != nil {
+		t.Fatal(err)
+	}
+	if proyecto != "canon" {
+		t.Errorf("proyecto = %q, want canon (from .hh-tracker.md)", proyecto)
+	}
+}

@@ -174,9 +174,9 @@ func ingestOpencode(db *sql.DB, srcPath string, now time.Time) (int, error) {
 		if projectName.Valid && projectName.String != "" {
 			proyecto = projectName.String
 		} else if directory.Valid && directory.String != "" {
-			proyecto = deriveProyecto(directory.String)
+			proyecto = resolveProyecto(directory.String)
 		} else if m.Path.Cwd != "" {
-			proyecto = deriveProyecto(m.Path.Cwd)
+			proyecto = resolveProyecto(m.Path.Cwd)
 		}
 
 		entryID, err := singleOpenEntryID(db)
@@ -342,7 +342,7 @@ func ingestClaudeFile(db *sql.DB, path string) (int, error) {
 
 		r := Response{
 			Ts:               tsParsed.Local().Format(tsLayout),
-			Proyecto:         deriveProyecto(cl.Cwd),
+			Proyecto:         resolveProyecto(cl.Cwd),
 			Cliente:          "claude-code",
 			Modelo:           cl.Message.Model,
 			DuracionS:        dur,
