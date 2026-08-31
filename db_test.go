@@ -169,6 +169,43 @@ func TestMigrateDBBothAbsent(t *testing.T) {
 	}
 }
 
+// ---- new tables (responses / ingest_state / meta) ------------------------
+
+func TestOpenDBNewTables(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	dbPath := filepath.Join(home, ".hh-tracker", "hh.db")
+
+	db, err := openDB(dbPath)
+	if err != nil {
+		t.Fatalf("openDB: %v", err)
+	}
+
+	if _, err := db.Exec(`INSERT INTO responses
+		(ts, proyecto, cliente, modelo, tokens_cache_write, tokens_cache_read, source, external_id)
+		VALUES ('2026-08-01T09:00:00.000000', 'p', 'claude-code', 'claude-sonnet-5', 12, 34, 'claude-code', 'abc')`); err != nil {
+		t.Fatalf("insert responses: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO ingest_state (source, watermark) VALUES ('opencode', '123')`); err != nil {
+		t.Fatalf("insert ingest_state: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO meta (key, value) VALUES ('k', 'v')`); err != nil {
+		t.Fatalf("insert meta: %v", err)
+	}
+	db.Close()
+
+	// Second open on same path stays green (idempotent) and data survives.
+	db2, err := openDB(dbPath)
+	if err != nil {
+		t.Fatalf("second openDB: %v", err)
+	}
+	defer db2.Close()
+	var n int
+	if err := db2.QueryRow(`SELECT COUNT(*) FROM responses`).Scan(&n); err != nil || n != 1 {
+		t.Fatalf("responses row missing after reopen: n=%d err=%v", n, err)
+	}
+}
+
 // ---- insertOpen -----------------------------------------------------------
 
 func TestInsertOpen(t *testing.T) {

@@ -57,6 +57,75 @@ func fmtDuracion(hh float64) string {
 	return fmt.Sprintf("%d HH %d min", h, m)
 }
 
+// ---- formatCostos --------------------------------------------------------
+
+// fmtSegundos renders a duration in seconds as a compact Spanish-friendly string.
+func fmtSegundos(s float64) string {
+	total := int(s + 0.5)
+	if total < 60 {
+		return fmt.Sprintf("%ds", total)
+	}
+	m := total / 60
+	rem := total % 60
+	if m < 60 {
+		return fmt.Sprintf("%dm %ds", m, rem)
+	}
+	h := m / 60
+	m = m % 60
+	return fmt.Sprintf("%dh %dm", h, m)
+}
+
+// formatCostos renders the cost report rows as a text table with a TOTAL line.
+func formatCostos(rows []CostRow) string {
+	if len(rows) == 0 {
+		return "Sin respuestas registradas en el rango."
+	}
+
+	var sb strings.Builder
+	sb.WriteString("💸 Costos por proyecto y modelo\n")
+	sb.WriteString(fmt.Sprintf("%-20s %-24s %8s  %-18s %-16s %10s  %10s\n",
+		"proyecto", "modelo", "nº resp", "tokens in/out", "cache w/r", "costo USD", "tiempo"))
+
+	var (
+		tResp                       int64
+		tIn, tOut, tCacheW, tCacheR int64
+		tCost, tDur                 float64
+	)
+	line := func(proyecto, modelo string, resp, in, out, cw, cr int64, cost, dur float64) {
+		sb.WriteString(fmt.Sprintf("%-20s %-24s %8d  %-18s %-16s %10.4f  %10s\n",
+			proyecto, modelo, resp,
+			fmt.Sprintf("%s/%s", fmtTokens(in), fmtTokens(out)),
+			fmt.Sprintf("%s / %s", fmtTokens(cw), fmtTokens(cr)),
+			cost, fmtSegundos(dur)))
+	}
+	for _, r := range rows {
+		line(r.Proyecto, r.Modelo, r.NumRespuestas, r.TokensIn, r.TokensOut,
+			r.SumCacheWrite, r.SumCacheRead, r.CostoUSD, r.DuracionS)
+		tResp += r.NumRespuestas
+		tIn += r.TokensIn
+		tOut += r.TokensOut
+		tCacheW += r.SumCacheWrite
+		tCacheR += r.SumCacheRead
+		tCost += r.CostoUSD
+		tDur += r.DuracionS
+	}
+
+	line("TOTAL", "", tResp, tIn, tOut, tCacheW, tCacheR, tCost, tDur)
+	return sb.String()
+}
+
+// fmtTokens renders a token count compactly (1234 -> "1.2k", 4100000 -> "4.1M").
+func fmtTokens(n int64) string {
+	switch {
+	case n >= 1_000_000:
+		return fmt.Sprintf("%.1fM", float64(n)/1_000_000)
+	case n >= 1_000:
+		return fmt.Sprintf("%.1fk", float64(n)/1_000)
+	default:
+		return fmt.Sprintf("%d", n)
+	}
+}
+
 // ---- reporte helper -------------------------------------------------------
 
 // reporte formats a list of closed entries for hh_semana and hh_mes output.

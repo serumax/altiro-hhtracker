@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -464,5 +465,99 @@ func TestHhMes_WithClosedEntry(t *testing.T) {
 	text := textOf(t, result)
 	if text == "" {
 		t.Error("expected non-empty output from hh_mes after inserting entry")
+	}
+}
+
+// ---- hh_costos -----------------------------------------------------------
+
+func TestHhCostos_Empty(t *testing.T) {
+	db := newTestDB(t)
+	result, err := hhCostosHandler(db)(context.Background(), callReq(nil))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	if !strings.Contains(textOf(t, result), "Sin respuestas registradas") {
+		t.Errorf("expected empty message, got: %q", textOf(t, result))
+	}
+}
+
+func TestHhCostos_AggregatesAndTotals(t *testing.T) {
+	db := newTestDB(t)
+
+	seed := []Response{
+		{Ts: "2026-08-10T10:00:00.000000", Proyecto: "alpha", Cliente: "opencode", Modelo: "m1", TokensIn: 100, TokensOut: 200, TokensCacheWrite: 4, TokensCacheRead: 6, CostoUSD: 0.5, Source: "opencode", ExternalID: "1"},
+		{Ts: "2026-08-11T10:00:00.000000", Proyecto: "alpha", Cliente: "opencode", Modelo: "m1", TokensIn: 50, TokensOut: 50, TokensCacheWrite: 0, TokensCacheRead: 0, CostoUSD: 0.25, Source: "opencode", ExternalID: "2"},
+		{Ts: "2026-08-12T10:00:00.000000", Proyecto: "beta", Cliente: "claude-code", Modelo: "m2", TokensIn: 1, TokensOut: 1, TokensCacheWrite: 1, TokensCacheRead: 1, CostoUSD: 0, Source: "claude-code", ExternalID: "3"},
+	}
+	for _, r := range seed {
+		if _, err := insertResponse(db, r); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	result, err := hhCostosHandler(db)(context.Background(), callReq(nil))
+	if err != nil {
+		t.Fatalf("handler error: %v", err)
+	}
+	text := textOf(t, result)
+	for _, want := range []string{"alpha", "m1", "beta", "m2", "TOTAL", "0.75"} {
+		if !strings.Contains(text, want) {
+			t.Errorf("expected %q in output, got:\n%s", want, text)
+		}
+	}
+
+	// proyecto filter
+	result, _ = hhCostosHandler(db)(context.Background(), callReq(map[string]any{"proyecto": "beta"}))
+	text = textOf(t, result)
+	if strings.Contains(text, "alpha") {
+		t.Errorf("proyecto filter leaked alpha: %s", text)
+	}
+}
+
+// ---- init subcommand -----------------------------------------------------
+
+func TestDoInit_CreatesFileThenIdempotent(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "my-cool-repo")
+	if err := os.MkdirAll(root, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	created, path, proyecto, err := doInit(root)
+	if err != nil {
+		t.Fatalf("doInit: %v", err)
+	}
+	if !created {
+		t.Error("first doInit: created=false, want true")
+	}
+	if path != filepath.Join(root, ".hh-tracker.md") {
+		t.Errorf("path = %q", path)
+	}
+	// No git, no parent marker => deriveProyecto returns the basename.
+	if proyecto != "my-cool-repo" {
+		t.Errorf("proyecto = %q, want my-cool-repo", proyecto)
+	}
+
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(b), "proyecto: my-cool-repo") {
+		t.Errorf("file contents missing proyecto line:\n%s", b)
+	}
+	if !strings.Contains(string(b), "alias: []") {
+		t.Errorf("file contents missing alias line:\n%s", b)
+	}
+
+	// Second call: idempotent, no clobber.
+	created2, _, _, err := doInit(root)
+	if err != nil {
+		t.Fatalf("second doInit: %v", err)
+	}
+	if created2 {
+		t.Error("second doInit: created=true, want false")
+	}
+	b2, _ := os.ReadFile(path)
+	if string(b2) != string(b) {
+		t.Errorf("file bytes changed on second doInit:\nbefore=%q\nafter=%q", b, b2)
 	}
 }

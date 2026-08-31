@@ -30,6 +30,9 @@ func main() {
 		case "install":
 			installCmd()
 			return
+		case "init":
+			initCmd()
+			return
 		case "version", "--version", "-v":
 			fmt.Println(versionLine())
 			return
@@ -63,6 +66,8 @@ func main() {
 	}
 	defer db.Close()
 
+	cfg := loadConfig(home)
+
 	s := server.NewMCPServer("altiro-hhtracker", "0.1.0",
 		server.WithToolCapabilities(true),
 		server.WithInstructions(instructions),
@@ -74,7 +79,7 @@ func main() {
 			mcp.Description("Descripción breve del trabajo.")),
 		mcp.WithString("proyecto",
 			mcp.Description("Nombre del proyecto (default: general).")),
-	), hhStartHandler(db))
+	), withActivity(db, hhStartHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_close",
 		mcp.WithDescription("Cierra una entrada abierta y registra la duración total."),
@@ -82,17 +87,17 @@ func main() {
 			mcp.Description("ID de la entrada abierta a cerrar.")),
 		mcp.WithString("resumen",
 			mcp.Description("Resumen opcional del trabajo realizado.")),
-	), hhCloseHandler(db))
+	), withActivity(db, hhCloseHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_status",
 		mcp.WithDescription("Lista todas las entradas actualmente abiertas."),
-	), hhStatusHandler(db))
+	), withActivity(db, hhStatusHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_delete",
 		mcp.WithDescription("Borra una entrada por ID (abierta o cerrada)."),
 		mcp.WithNumber("entry_id", mcp.Required(),
 			mcp.Description("ID de la entrada a borrar.")),
-	), hhDeleteHandler(db))
+	), withActivity(db, hhDeleteHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_update",
 		mcp.WithDescription("Actualiza campos de una entrada existente. Solo se pasan los campos a cambiar."),
@@ -110,7 +115,7 @@ func main() {
 			mcp.Description("Nuevo resumen.")),
 		mcp.WithNumber("duracion_hh",
 			mcp.Description("Duración explícita en horas. Si se omite y hay inicio y fin, se recalcula.")),
-	), hhUpdateHandler(db))
+	), withActivity(db, hhUpdateHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_report",
 		mcp.WithDescription("Lista las entradas cerradas en un rango de fechas opcional."),
@@ -120,7 +125,7 @@ func main() {
 			mcp.Description("Fecha de fin YYYY-MM-DD (inclusive).")),
 		mcp.WithString("proyecto",
 			mcp.Description("Filtra por proyecto (opcional).")),
-	), hhReportHandler(db))
+	), withActivity(db, hhReportHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_manual",
 		mcp.WithDescription("Registra una entrada de tiempo manualmente."),
@@ -134,7 +139,7 @@ func main() {
 			mcp.Description("Duración en horas fraccionarias.")),
 		mcp.WithString("resumen",
 			mcp.Description("Resumen opcional.")),
-	), hhManualHandler(db))
+	), withActivity(db, hhManualHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_semana",
 		mcp.WithDescription("Reporte de horas de la semana."),
@@ -142,7 +147,7 @@ func main() {
 			mcp.Description("Desplazamiento de semana (0=esta semana, -1=semana pasada).")),
 		mcp.WithString("proyecto",
 			mcp.Description("Filtra por proyecto (opcional).")),
-	), hhSemanaHandler(db))
+	), withActivity(db, hhSemanaHandler(db)))
 
 	s.AddTool(mcp.NewTool("hh_mes",
 		mcp.WithDescription("Reporte de horas del mes."),
@@ -150,7 +155,21 @@ func main() {
 			mcp.Description("Desplazamiento de mes (0=este mes, -1=mes pasado).")),
 		mcp.WithString("proyecto",
 			mcp.Description("Filtra por proyecto (opcional).")),
-	), hhMesHandler(db))
+	), withActivity(db, hhMesHandler(db)))
+
+	s.AddTool(mcp.NewTool("hh_costos",
+		mcp.WithDescription("Reporte de costo y tokens de respuestas de agentes, agrupado por proyecto y modelo."),
+		mcp.WithString("desde",
+			mcp.Description("Fecha de inicio YYYY-MM-DD (inclusive).")),
+		mcp.WithString("hasta",
+			mcp.Description("Fecha de fin YYYY-MM-DD (inclusive).")),
+		mcp.WithString("proyecto",
+			mcp.Description("Filtra por proyecto (opcional).")),
+		mcp.WithString("modelo",
+			mcp.Description("Filtra por modelo (opcional).")),
+	), withActivity(db, hhCostosHandler(db)))
+
+	startWorker(db, cfg)
 
 	if err := server.ServeStdio(s); err != nil {
 		log.Fatalf("ServeStdio: %v", err)
@@ -389,6 +408,21 @@ func hhMesHandler(db *sql.DB) server.ToolHandlerFunc {
 	}
 }
 
+func hhCostosHandler(db *sql.DB) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		desde := req.GetString("desde", "")
+		hasta := req.GetString("hasta", "")
+		proyecto := req.GetString("proyecto", "")
+		modelo := req.GetString("modelo", "")
+
+		rows, err := costReport(db, desde, hasta, proyecto, modelo)
+		if err != nil {
+			return mcp.NewToolResultText(fmt.Sprintf("ERROR: %v", err)), nil
+		}
+		return mcp.NewToolResultText(formatCostos(rows)), nil
+	}
+}
+
 // ---- Internal helpers -------------------------------------------------------
 
 func versionLine() string {
@@ -402,11 +436,52 @@ func printHelp() {
 	fmt.Println()
 	fmt.Println("Subcomandos:")
 	fmt.Println("  install            Registra el servidor en Claude Code / OpenCode")
+	fmt.Println("  init               Crea .hh-tracker.md en la raíz del repo actual")
 	fmt.Println("  version|--version  Muestra la versión")
 	fmt.Println("  help|--help        Muestra esta ayuda")
 	fmt.Println()
 	fmt.Println("Tools MCP: hh_start, hh_close, hh_status, hh_delete, hh_update,")
-	fmt.Println("           hh_manual, hh_report, hh_semana, hh_mes")
+	fmt.Println("           hh_manual, hh_report, hh_semana, hh_mes, hh_costos")
+}
+
+// ---- init subcommand --------------------------------------------------------
+
+// doInit writes a starter .hh-tracker.md at root unless one already exists.
+// It never clobbers: created is false when the file is already there.
+func doInit(root string) (created bool, path string, proyecto string, err error) {
+	path = filepath.Join(root, projectFileName)
+	if _, statErr := os.Stat(path); statErr == nil {
+		return false, path, "", nil
+	}
+
+	proyecto = deriveProyecto(root)
+	content := fmt.Sprintf("---\nproyecto: %s\nalias: []\n---\n", proyecto)
+	if err = os.WriteFile(path, []byte(content), 0644); err != nil {
+		return false, path, proyecto, err
+	}
+	return true, path, proyecto, nil
+}
+
+// initCmd resolves the main checkout root for the current directory (the
+// primary checkout even when run from a linked worktree) and runs doInit there,
+// so every worktree shares one .hh-tracker.md.
+func initCmd() {
+	root, err := mainCheckoutRoot(".")
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "ERROR: no estás dentro de un repositorio git.")
+		os.Exit(1)
+	}
+
+	created, path, proyecto, err := doInit(root)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
+		os.Exit(1)
+	}
+	if created {
+		fmt.Printf("✓ creado %s (proyecto: %s) — edítalo si el nombre o los alias no calzan\n", path, proyecto)
+	} else {
+		fmt.Printf("ya existe: %s\n", path)
+	}
 }
 
 // ---- Install subcommand -------------------------------------------------------
