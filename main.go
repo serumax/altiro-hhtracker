@@ -462,16 +462,17 @@ func doInit(root string) (created bool, path string, proyecto string, err error)
 	return true, path, proyecto, nil
 }
 
-// initCmd resolves the current git repo root and runs doInit against it.
+// initCmd resolves the main checkout root for the current directory (the
+// primary checkout even when run from a linked worktree) and runs doInit there,
+// so every worktree shares one .hh-tracker.md.
 func initCmd() {
-	root, err := exec.Command("git", "-C", ".", "rev-parse", "--show-toplevel").Output()
-	rootStr := strings.TrimSpace(string(root))
-	if err != nil || rootStr == "" {
+	root, err := mainCheckoutRoot(".")
+	if err != nil {
 		fmt.Fprintln(os.Stderr, "ERROR: no estás dentro de un repositorio git.")
 		os.Exit(1)
 	}
 
-	created, path, proyecto, err := doInit(rootStr)
+	created, path, proyecto, err := doInit(root)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "ERROR: %v\n", err)
 		os.Exit(1)

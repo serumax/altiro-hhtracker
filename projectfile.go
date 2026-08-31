@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -110,8 +111,32 @@ func findProjectFile(startDir string) (ProjectFile, bool) {
 	}
 }
 
-// resolveProyecto returns the canonical project name for a directory: the
-// proyecto from the nearest .hh-tracker.md when present, otherwise the
+// gitMainRoot returns the main checkout root for dir: the parent of git's
+// common-dir. From inside a linked worktree this is the primary checkout (where
+// a committed .hh-tracker.md lives and where `init` writes one), not the
+// worktree directory. ok is false when dir is not inside a git repository.
+func gitMainRoot(dir string) (string, bool) {
+	out := gitOutput(dir, "rev-parse", "--path-format=absolute", "--git-common-dir")
+	if out == "" {
+		return "", false
+	}
+	return filepath.Dir(out), true
+}
+
+// mainCheckoutRoot resolves the primary checkout root for dir, erroring when dir
+// is not inside a git repository.
+func mainCheckoutRoot(dir string) (string, error) {
+	root, ok := gitMainRoot(dir)
+	if !ok {
+		return "", fmt.Errorf("no estás dentro de un repositorio git")
+	}
+	return root, nil
+}
+
+// resolveProyecto returns the canonical project name for a directory. Resolution
+// order: (1) proyecto from a .hh-tracker.md at the git main-checkout root — this
+// is what makes linked worktrees resolve to the shared canonical name; (2)
+// proyecto from a .hh-tracker.md found walking up the literal path; (3) the
 // git/basename-derived name. Results are memoized per dir.
 func resolveProyecto(dir string) string {
 	if dir == "" {
@@ -120,10 +145,21 @@ func resolveProyecto(dir string) string {
 	if v, ok := resolvedProyectoCache.Load(dir); ok {
 		return v.(string)
 	}
-	name := deriveProyecto(dir)
-	if pf, ok := findProjectFile(dir); ok && pf.Proyecto != "" {
-		name = pf.Proyecto
-	}
+	name := computeResolvedProyecto(dir)
 	resolvedProyectoCache.Store(dir, name)
 	return name
+}
+
+func computeResolvedProyecto(dir string) string {
+	if root, ok := gitMainRoot(dir); ok {
+		if content, err := os.ReadFile(filepath.Join(root, projectFileName)); err == nil {
+			if pf := parseProjectFile(content); pf.Proyecto != "" {
+				return pf.Proyecto
+			}
+		}
+	}
+	if pf, ok := findProjectFile(dir); ok && pf.Proyecto != "" {
+		return pf.Proyecto
+	}
+	return deriveProyecto(dir)
 }
