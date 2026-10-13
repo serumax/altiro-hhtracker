@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -77,15 +78,26 @@ func trackProject(db *sql.DB, input TrackingInput, now time.Time, reminder time.
 		if err != nil {
 			return TrackingResult{}, err
 		}
+		literalCwd := cwd
 		if resolved, err := filepath.EvalSymlinks(cwd); err == nil {
 			cwd = resolved
 		}
 		if root, err := mainCheckoutRoot(cwd); err == nil {
 			cwd = root
 		}
-		if file, ok := findProjectFile(cwd); ok && file.Proyecto != "" {
-			input.Project = file.Proyecto
-			marker = true
+		// Keep the canonical primary-root binding, but match metric resolution:
+		// the primary marker wins, then the original literal worktree is searched.
+		if content, err := os.ReadFile(filepath.Join(cwd, projectFileName)); err == nil {
+			if file := parseProjectFile(content); file.Proyecto != "" {
+				input.Project = file.Proyecto
+				marker = true
+			}
+		}
+		if !marker {
+			if file, ok := findProjectFile(literalCwd); ok && file.Proyecto != "" {
+				input.Project = file.Proyecto
+				marker = true
+			}
 		}
 	}
 	if input.Project == "" && cwd == "" {

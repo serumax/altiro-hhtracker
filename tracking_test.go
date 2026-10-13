@@ -378,3 +378,42 @@ func TestTrackingMarkerConfirmationPreservesPreviousHumanTime(t *testing.T) {
 		t.Fatalf("marker confirmation concealed previous human gap: %+v", result)
 	}
 }
+
+func TestTrackingLinkedWorktreeMarkerMatchesMetricResolution(t *testing.T) {
+	for _, primaryMarker := range []bool{false, true} {
+		t.Run(fmt.Sprint(primaryMarker), func(t *testing.T) {
+			mainRoot, worktree := setupWorktree(t, "tracking-marker")
+			db := openTestDB(t)
+			if err := os.WriteFile(filepath.Join(worktree, projectFileName), []byte("---\nproyecto: worktree-only\n---\n"), 0644); err != nil {
+				t.Fatal(err)
+			}
+			expected := "worktree-only"
+			if primaryMarker {
+				if err := os.WriteFile(filepath.Join(mainRoot, projectFileName), []byte("---\nproyecto: primary\n---\n"), 0644); err != nil {
+					t.Fatal(err)
+				}
+				expected = "primary"
+			}
+			input := humanEvent("", "chat", "first")
+			input.Cwd = worktree
+			result := trackAt(t, db, input, time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC))
+			if !result.Initialized || result.Ask || result.Project != expected || result.Project != computeResolvedProyecto(worktree) {
+				t.Fatalf("tracking and metrics disagree: %+v metric=%s", result, computeResolvedProyecto(worktree))
+			}
+			var bound string
+			if err := db.QueryRow("SELECT cwd FROM tracking_workspaces WHERE scope=?", result.ContextID).Scan(&bound); err != nil {
+				t.Fatal(err)
+			}
+			if bound != mainRoot {
+				t.Fatalf("workspace binding lost primary root: %s want %s", bound, mainRoot)
+			}
+			// Another chat in the primary checkout reuses the initialized binding even
+			// when its only project marker was supplied by the linked worktree.
+			input.Chat, input.EventID, input.Cwd = "other-chat", "second", mainRoot
+			reused := trackAt(t, db, input, time.Date(2026, 10, 13, 9, 1, 0, 0, time.UTC))
+			if reused.ContextID != result.ContextID || !reused.Initialized || reused.Ask {
+				t.Fatalf("primary binding not reused: %+v", reused)
+			}
+		})
+	}
+}

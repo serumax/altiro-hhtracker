@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -30,6 +29,20 @@ func main() {
 		case "install":
 			installCmd()
 			return
+		case "hook":
+			if len(os.Args) != 3 || os.Args[2] != "codex" {
+				fmt.Fprintln(os.Stderr, "Usage: altiro-hhtracker hook codex")
+				os.Exit(1)
+			}
+			home, err := os.UserHomeDir()
+			if err == nil {
+				err = runCodexHook(os.Stdin, os.Stdout, home, time.Now())
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "HH Tracker hook unavailable: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		case "init":
 			initCmd()
 			return
@@ -47,22 +60,9 @@ func main() {
 		log.Fatalf("UserHomeDir: %v", err)
 	}
 
-	dbPath := filepath.Join(home, ".hh-tracker", "hh.db")
-	// Migration source: where the Python server kept the database.
-	srcPath := filepath.Join(home, ".claude", "mcp-servers", "hh-tracker", "hh.db")
-
-	// Ensure the destination directory exists before migration so that
-	// migrateDB can create the file if the source is present.
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-		log.Printf("mkdir %s: %v", filepath.Dir(dbPath), err)
-	}
-	if err := migrateDB(srcPath, dbPath); err != nil {
-		log.Printf("migrateDB: %v", err)
-	}
-
-	db, err := openDB(dbPath)
+	db, err := openTrackerDB(home)
 	if err != nil {
-		log.Fatalf("openDB: %v", err)
+		log.Fatalf("open tracker database: %v", err)
 	}
 	defer db.Close()
 
@@ -449,8 +449,9 @@ func printHelp() {
 	fmt.Println("Servidor MCP para registrar horas de trabajo. Sin argumentos, corre por stdio.")
 	fmt.Println()
 	fmt.Println("Subcomandos:")
-	fmt.Println("  install            Registra el servidor en Claude Code / OpenCode")
+	fmt.Println("  install            Registra MCP en Codex / Claude Code / OpenCode")
 	fmt.Println("  init               Crea .hh-tracker.md en la raíz del repo actual")
+	fmt.Println("  hook codex         Reads Codex UserPromptSubmit JSON from stdin")
 	fmt.Println("  version|--version  Muestra la versión")
 	fmt.Println("  help|--help        Muestra esta ayuda")
 	fmt.Println()
@@ -499,88 +500,6 @@ func initCmd() {
 }
 
 // ---- Install subcommand -------------------------------------------------------
-
-func installCmd() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: no se pudo encontrar el home: %v\n", err)
-		os.Exit(1)
-	}
-
-	found := false
-
-	// Claude Code — ~/.claude.json exists
-	claudeJSON := filepath.Join(home, ".claude.json")
-	if _, err := os.Stat(claudeJSON); err == nil {
-		if err := installClaudeCode(); err != nil {
-			fmt.Printf("Claude Code: ERROR — %v\n", err)
-		} else {
-			fmt.Println("Claude Code: ✓ registrado")
-			found = true
-		}
-	}
-
-	// OpenCode — ~/.config/opencode/config.json exists
-	opencodeCfg := filepath.Join(home, ".config", "opencode", "config.json")
-	if _, err := os.Stat(opencodeCfg); err == nil {
-		if err := installOpenCode(opencodeCfg); err != nil {
-			fmt.Printf("OpenCode:    ERROR — %v\n", err)
-		} else {
-			fmt.Println("OpenCode:    ✓ registrado")
-			found = true
-		}
-	}
-
-	if !found {
-		fmt.Println("No se detectó ningún cliente compatible (Claude Code, OpenCode).")
-		fmt.Println("Agrega manualmente a tu cliente MCP:")
-		fmt.Println(`  command: altiro-hhtracker`)
-		return
-	}
-
-	fmt.Println("\nListo. Reinicia tu cliente para activar altiro-hhtracker.")
-}
-
-func installClaudeCode() error {
-	// Remove first so re-runs are idempotent (mcp add fails if name exists).
-	exec.Command("claude", "mcp", "remove", "altiro-hhtracker", "--scope", "user").Run()
-	out, err := exec.Command("claude", "mcp", "add", "altiro-hhtracker", "--scope", "user", "--", "altiro-hhtracker").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func installOpenCode(cfgPath string) error {
-	raw, err := os.ReadFile(cfgPath)
-	if err != nil {
-		return fmt.Errorf("leer config: %v", err)
-	}
-
-	var cfg map[string]any
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return fmt.Errorf("parsear config: %v", err)
-	}
-
-	if cfg["mcp"] == nil {
-		cfg["mcp"] = map[string]any{}
-	}
-	mcpBlock, ok := cfg["mcp"].(map[string]any)
-	if !ok {
-		return fmt.Errorf("la clave 'mcp' en config.json no es un objeto")
-	}
-
-	mcpBlock["altiro-hhtracker"] = map[string]any{
-		"type":    "local",
-		"command": "altiro-hhtracker",
-	}
-
-	out, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("serializar config: %v", err)
-	}
-	return os.WriteFile(cfgPath, out, 0644)
-}
 
 // normalizeTimestamp converts a bare HH:MM string to a full ISO timestamp
 // using today's date. Strings that already contain a date separator are

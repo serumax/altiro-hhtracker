@@ -3,7 +3,9 @@
 Track the user's HUMAN work hours by project and task. Assistant response metrics
 are separate. These rules apply to the root orchestrator: delegated agents report
 their work to it and do not start, close, update, delete or manually record HH.
-This is a collaboration policy, not caller authentication.
+This is a collaboration policy, not caller authentication. On confirmed human
+turns the root calls `hh_tracking` before task work. Reuse initialized project
+context across chats; silence never closes hours.
 
 ## Project context across chats
 
@@ -113,3 +115,23 @@ The server stores state and coordinates questions, but cannot force a client to
 invoke a tool or wake an inactive chat. Without a verified event adapter, these
 checks depend on the root orchestrator following the instructions. Do not promise
 that an unsupported client automatically delivers start or idle notifications.
+
+## Codex event adapter
+
+When installed and trusted, `altiro-hhtracker hook codex` handles UserPromptSubmit
+and injects root-check metadata. The native event does not certify human/root
+origin: automated continuations may also appear as user prompts. Verify the actual
+current message's origin before invoking the supplied `hh_tracking` check. Ignore
+this adapter context when you are a delegated agent or the message is synthetic.
+
+Use the supplied `turn_id:human` event ID for that confirmed check. The adapter's
+technical observation uses `turn_id:observed`; those identities must remain distinct
+so technical replay cannot suppress actual human confirmation. Keep the supplied
+Codex `session_id` as `chat`, not as a human-session boundary. Never use a newly
+generated event ID on retries, and never copy another chat's claim token.
+
+No Stop/SessionEnd task-closing hook is installed. Codex response metrics are not
+imported by this adapter. Claude/OpenCode continue to use these MCP instructions;
+no unverified event schemas are assumed. If the adapter is unavailable or skipped
+for trust review, use the confirmed-human MCP checks directly and disclose that
+client delivery remains unverified.

@@ -25,8 +25,10 @@ Configure as an MCP server in your AI coding client (Claude Code, OpenCode, etc.
 }
 ```
 
-`altiro-hhtracker install` autodetects Claude Code and OpenCode and registers the
-server for you. The server injects its usage instructions automatically on connect.
+`altiro-hhtracker install` detects Codex CLI, Claude Code and OpenCode and registers
+MCP for detected clients. Codex additionally receives a UserPromptSubmit context
+hook. The server injects its tracking instructions on connect. Installation failures
+return a nonzero exit and report partial success; successful client changes remain.
 
 ## Tools
 
@@ -140,8 +142,8 @@ The background worker only imports response metrics. Existing HH/history is pres
 
 Without a verified client event adapter, the root assistant must call `hh_tracking`
 following the injected instructions. The server does not wake inactive chats or
-promise delivery of a prompt exactly two hours later. Codex event integration is
-not yet installed by this tracking-core change.
+promise delivery of a prompt exactly two hours later. The Codex adapter below can provide
+context at submitted prompts, but the root must still verify their human origin.
 
 ## Configuration
 
@@ -162,3 +164,44 @@ is absent.
 values fall back to 120. The setting controls clarification on human return, not
 a timer or automatic close. Keep the server's local timezone consistent with the
 user's timezone for hour-entry timestamps.
+
+## Codex local integration
+
+Installation registers the owned MCP name with `codex mcp add altiro-hhtracker --
+<absolute executable>` and atomically merges only the marked UserPromptSubmit
+handler into `~/.codex/hooks.json` (or `$CODEX_HOME/hooks.json`). Existing events,
+other handlers and unknown fields are retained. Malformed JSON, duplicate keys,
+invalid hook collections and symlink configuration files are refused unchanged.
+Codex hook preflight precedes its MCP registration; a later file-write failure is
+reported as partial, not silently rolled back. Reinstallation is idempotent.
+Claude retains its user-scoped registration; OpenCode JSON writes are atomic.
+
+Review and trust the new hook through Codex `/hooks`, then reload the client.
+The installer never changes trust or approval preferences. Command scripts must
+exist on the local execution host; this installer supports POSIX hook commands.
+A custom `CODEX_HOME` must be an existing absolute directory.
+[Official hooks documentation](https://learn.chatgpt.com/docs/hooks),
+[official MCP setup](https://learn.chatgpt.com/docs/extend/mcp?surface=cli),
+[official environment settings](https://learn.chatgpt.com/docs/config-file/environment-variables).
+
+The hook command `altiro-hhtracker hook codex` consumes one JSON object from stdin,
+limited to 256 KiB. It validates event metadata and emits Codex developer-context
+JSON, without retaining or echoing prompt text, reading transcripts, starting a
+worker, or closing tasks. Unknown native provenance stays unconfirmed: UserPromptSubmit
+alone is not proof of human work because automatic continuations can create prompts.
+The context instructs the actual root orchestrator to verify origin and call
+`hh_tracking` using the stable `turn_id:human` event identity. Technical observation
+uses `turn_id:observed`; retries do not create new human activity. Explicit
+synthetic/subagent events are excluded, and undocumented positive human flags are
+not treated as authority. No Stop or SessionEnd closing hook is installed.
+
+This is contextual assistance, **not guaranteed native UI questioning** or a
+background timer. Desktop hook delivery, hook trust and the installed runtime still
+need a live smoke test; cloud-orchestrated hook execution is outside this local
+adapter. Claude/OpenCode retain instruction-driven tracking, not invented hook
+support. Codex human-task tracking does not imply Codex token/cost ingestion.
+
+For a safe local check, run `go test ./... -count=1`; the executable integration
+test builds into a temporary directory and uses temporary HOME/database/config
+paths. It exercises root confirmation, initialization, task start/close, reused
+chats, duplicate events and two-hour continuity without sleeping.
