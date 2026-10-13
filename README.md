@@ -45,6 +45,31 @@ server for you. The server injects its usage instructions automatically on conne
 
 Data is stored locally at `~/.hh-tracker/hh.db`.
 
+## Entry safety and response attribution
+
+Manual entries accept local `HH:MM` or `YYYY-MM-DDTHH:MM:SS[.fraction]`
+start/end pairs, or a positive duration in hours alone. Partial pairs, invalid
+local timestamps, reversed intervals, negative/non-finite durations and durations
+outside the representable range are rejected before writing. Timestamp pairs
+calculate elapsed hours; duration-only mode counts backward from the current time.
+
+Updates are atomic: validation and duration recalculation cannot leave partially
+changed entries. Empty strings and zero duration mean unchanged. A positive
+explicit update duration overrides elapsed time; updating `fin` does not implicitly
+close a record. Concurrent close attempts cannot overwrite the first successful
+close. Deleting an entry clears its metric links without deleting response metrics.
+
+Start, close, update and manual recording warn about overlapping human-time
+intervals, including other projects. Warnings do not modify other entries or prevent
+recording; review overlaps manually instead of summing parallel work blindly.
+
+Newly imported response metrics link to an entry only when its canonical project
+and response timestamp match exactly one recorded interval. Intervals include their
+start and exclude their end, so adjacent tasks are not ambiguous. Missing or
+multiple matches remain unlinked; a currently open task never claims unrelated
+historical responses. `.hh-tracker.md` takes precedence over OpenCode display names.
+Existing history is not relinked automatically.
+
 ## Project files
 
 Run once per repository:

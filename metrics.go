@@ -37,7 +37,16 @@ type CostRow struct {
 // insertResponse inserts a response row, ignoring duplicates by (source, external_id).
 // inserted reflects whether a new row was actually written.
 func insertResponse(db *sql.DB, r Response) (inserted bool, err error) {
-	res, err := db.Exec(
+	tx, err := db.Begin()
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback()
+	r.EntryID, err = matchingEntryID(tx, r.Proyecto, r.Ts)
+	if err != nil {
+		return false, err
+	}
+	res, err := tx.Exec(
 		`INSERT INTO responses
 		   (ts, proyecto, cliente, modelo, duracion_s, tokens_in, tokens_out,
 		    tokens_cache_write, tokens_cache_read, costo_usd, entry_id, source, external_id)
@@ -52,6 +61,9 @@ func insertResponse(db *sql.DB, r Response) (inserted bool, err error) {
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(); err != nil {
 		return false, err
 	}
 	return n > 0, nil
@@ -97,29 +109,43 @@ func setMeta(db *sql.DB, key, value string) error {
 	return err
 }
 
-// singleOpenEntryID returns the id only when exactly one entry is open.
-func singleOpenEntryID(db *sql.DB) (sql.NullInt64, error) {
-	rows, err := db.Query(`SELECT id FROM entries WHERE estado='abierto' LIMIT 2`)
+// matchingEntryID uses historical project/time evidence, never the currently
+// open task alone. Half-open intervals avoid ambiguous adjacent boundaries.
+// Missing or overlapping evidence leaves the metric unlinked.
+func matchingEntryID(tx *sql.Tx, project, timestamp string) (sql.NullInt64, error) {
+	stamp, err := parseTS(timestamp)
+	if project == "" || err != nil {
+		return sql.NullInt64{}, nil
+	}
+	rows, err := tx.Query(`SELECT id, inicio, fin, estado FROM entries WHERE proyecto=?`, project)
 	if err != nil {
 		return sql.NullInt64{}, err
 	}
 	defer rows.Close()
-
-	var ids []int64
+	match := sql.NullInt64{}
 	for rows.Next() {
 		var id int64
-		if err := rows.Scan(&id); err != nil {
+		var startString, state string
+		var endString sql.NullString
+		if err := rows.Scan(&id, &startString, &endString, &state); err != nil {
 			return sql.NullInt64{}, err
 		}
-		ids = append(ids, id)
+		start, err := parseTS(startString)
+		if err != nil || stamp.Before(start) || (!endString.Valid && state != "abierto") {
+			continue
+		}
+		if endString.Valid {
+			end, err := parseTS(endString.String)
+			if err != nil || !stamp.Before(end) {
+				continue
+			}
+		}
+		if match.Valid {
+			return sql.NullInt64{}, nil
+		}
+		match = sql.NullInt64{Int64: id, Valid: true}
 	}
-	if err := rows.Err(); err != nil {
-		return sql.NullInt64{}, err
-	}
-	if len(ids) == 1 {
-		return sql.NullInt64{Int64: ids[0], Valid: true}, nil
-	}
-	return sql.NullInt64{}, nil
+	return match, rows.Err()
 }
 
 // costReport aggregates responses grouped by (proyecto, modelo), optionally

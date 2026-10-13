@@ -3,8 +3,10 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"math"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -650,4 +652,158 @@ func absDiff(a, b float64) float64 {
 		return a - b
 	}
 	return b - a
+}
+
+func TestEntryMutationsRejectInvalidInputWithoutWrites(t *testing.T) {
+	for _, tc := range []struct {
+		name, inicio, fin string
+		duration          float64
+	}{
+		{"invalid", "broken", "2026-08-01T10:00:00", 0},
+		{"invalid end", "2026-08-01T09:00:00", "broken", 0},
+		{"invalid clock", "25:00", "26:00", 0},
+		{"reversed explicit", "2026-08-01T11:00:00", "2026-08-01T10:00:00", 2},
+		{"range overflow", "1000-08-01T09:00:00", "3000-08-01T10:00:00", 0},
+		{"reversed", "2026-08-01T11:00:00", "2026-08-01T10:00:00", 0},
+		{"negative", "", "", -1}, {"nan", "", "", math.NaN()},
+		{"infinite", "", "", math.Inf(1)}, {"overflow", "", "", 1e20},
+		{"partial range", "2026-08-01T09:00:00", "", 1},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			seedClosed(t, db, "original", "project", "2026-08-01T09:00:00", "2026-08-01T10:00:00", 1)
+			before, _ := getEntry(db, 1)
+			if _, err := updateEntry(db, 1, "changed", "", tc.inicio, tc.fin, "", tc.duration); tc.name != "partial range" && err == nil {
+				t.Fatal("update accepted invalid input")
+			}
+			after, _ := getEntry(db, 1)
+			if tc.name != "partial range" && after != before {
+				t.Fatalf("failed update changed entry: %+v", after)
+			}
+			if _, err := insertManual(db, "invalid", "project", tc.inicio, tc.fin, tc.duration, ""); err == nil {
+				t.Fatal("manual accepted invalid input")
+			}
+			var count int
+			db.QueryRow("SELECT count(*) FROM entries").Scan(&count)
+			if count != 1 {
+				t.Fatalf("invalid manual wrote row: count=%d", count)
+			}
+		})
+	}
+}
+
+func TestConcurrentCloseFirstWins(t *testing.T) {
+	db := openTestDB(t)
+	id, _, err := insertOpen(db, "task", "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	const workers = 20
+	start := make(chan struct{})
+	results := make(chan error, workers)
+	var wg sync.WaitGroup
+	for i := 0; i < workers; i++ {
+		wg.Add(1)
+		go func() { defer wg.Done(); <-start; _, err := closeEntry(db, int(id), "winner"); results <- err }()
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	successes := 0
+	for err := range results {
+		if err == nil {
+			successes++
+		}
+	}
+	if successes != 1 {
+		t.Fatalf("successful closes=%d, want 1", successes)
+	}
+}
+
+func TestDeleteEntryPreservesMetricsAndClearsLink(t *testing.T) {
+	db := openTestDB(t)
+	id, _, _ := insertOpen(db, "task", "project")
+	_, err := db.Exec("INSERT INTO responses (ts, proyecto, cliente, modelo, entry_id, source, external_id) VALUES ('2026-08-01T09:00:00','project','test','test',?,'test','one')", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteEntry(db, int(id)); err != nil {
+		t.Fatal(err)
+	}
+	var link sql.NullInt64
+	if err := db.QueryRow("SELECT entry_id FROM responses").Scan(&link); err != nil {
+		t.Fatal(err)
+	}
+	if link.Valid {
+		t.Fatalf("deleted entry still linked: %+v", link)
+	}
+}
+
+func TestCloseRejectsFutureStart(t *testing.T) {
+	db := openTestDB(t)
+	id, _, _ := insertOpen(db, "task", "project")
+	future := time.Now().Add(time.Hour).Format(tsLayout)
+	db.Exec("UPDATE entries SET inicio=? WHERE id=?", future, id)
+	if _, err := closeEntry(db, int(id), ""); err == nil {
+		t.Fatal("closed future entry")
+	}
+	e, _ := getEntry(db, id)
+	if e.Estado != "abierto" || e.Fin.Valid {
+		t.Fatalf("failed close mutated entry: %+v", e)
+	}
+}
+
+func TestUpdateFinDoesNotImplicitlyClose(t *testing.T) {
+	db := openTestDB(t)
+	id, _, err := insertOpen(db, "task", "project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := updateEntry(db, int(id), "", "", "2026-08-01T09:00:00", "2026-08-01T10:00:00", "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Estado != "abierto" || entry.DuracionHH.Float64 != 1 {
+		t.Fatalf("unexpected update: %+v", entry)
+	}
+}
+
+func TestUpdateRollbackOnDatabaseFailure(t *testing.T) {
+	db := openTestDB(t)
+	seedClosed(t, db, "original", "project", "2026-08-01T09:00:00", "2026-08-01T10:00:00", 1)
+	before, _ := getEntry(db, 1)
+	_, err := db.Exec(`CREATE TRIGGER reject_duration BEFORE UPDATE OF duracion_hh ON entries BEGIN SELECT RAISE(ABORT, 'injected failure'); END`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := updateEntry(db, 1, "changed", "", "", "2026-08-01T11:00:00", "", 0); err == nil {
+		t.Fatal("update unexpectedly succeeded")
+	}
+	after, _ := getEntry(db, 1)
+	if after != before {
+		t.Fatalf("failed update persisted partial fields: %+v", after)
+	}
+}
+
+func TestDeleteRollbackOnLinkFailure(t *testing.T) {
+	db := openTestDB(t)
+	id, _, _ := insertOpen(db, "original", "project")
+	_, err := db.Exec(`INSERT INTO responses (ts, proyecto, cliente, modelo, source, external_id, entry_id) VALUES ('2026-08-01T09:30:00','project','test','test','test','one',?)`, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`CREATE TRIGGER reject_link BEFORE UPDATE OF entry_id ON responses BEGIN SELECT RAISE(ABORT, 'injected failure'); END`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := deleteEntry(db, int(id)); err == nil {
+		t.Fatal("delete unexpectedly succeeded")
+	}
+	if _, err := getEntry(db, id); err != nil {
+		t.Fatalf("entry lost despite failed deletion: %v", err)
+	}
+	var link int64
+	if err := db.QueryRow("SELECT entry_id FROM responses").Scan(&link); err != nil || link != id {
+		t.Fatalf("link changed despite failure: %d %v", link, err)
+	}
 }

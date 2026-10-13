@@ -100,30 +100,41 @@ func TestMetaRoundTrip(t *testing.T) {
 	}
 }
 
-func TestSingleOpenEntryID(t *testing.T) {
-	db := openTestDB(t)
-
-	// none open
-	id, err := singleOpenEntryID(db)
-	if err != nil {
-		t.Fatalf("singleOpenEntryID: %v", err)
-	}
-	if id.Valid {
-		t.Fatalf("no open entries: expected invalid, got %v", id.Int64)
-	}
-
-	// exactly one
-	oid, _, _ := insertOpen(db, "task", "p")
-	id, _ = singleOpenEntryID(db)
-	if !id.Valid || id.Int64 != oid {
-		t.Fatalf("one open entry: expected %d, got %+v", oid, id)
-	}
-
-	// two open -> invalid
-	insertOpen(db, "task2", "p")
-	id, _ = singleOpenEntryID(db)
-	if id.Valid {
-		t.Fatalf("two open entries: expected invalid, got %v", id.Int64)
+func TestInsertResponseProjectTimeAttribution(t *testing.T) {
+	for _, tc := range []struct {
+		name, project, ts string
+		ambiguous         bool
+		want              int64
+	}{
+		{"historical match", "a", "2026-08-01T09:30:00", false, 1},
+		{"other project", "b", "2026-08-01T09:30:00", false, 0},
+		{"before start", "a", "2026-08-01T08:00:00", false, 0},
+		{"at end", "a", "2026-08-01T10:00:00", false, 0},
+		{"after end", "a", "2026-08-01T11:00:00", false, 0},
+		{"ambiguous", "a", "2026-08-01T09:30:00", true, 0},
+		{"unknown project", "", "2026-08-01T09:30:00", false, 0},
+		{"invalid timestamp", "a", "invalid", false, 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			db := openTestDB(t)
+			seedClosed(t, db, "historical task", "a", "2026-08-01T09:00:00", "2026-08-01T10:00:00", 1)
+			if tc.ambiguous {
+				seedClosed(t, db, "other task", "a", "2026-08-01T09:15:00", "2026-08-01T09:45:00", .5)
+			}
+			insertOpen(db, "current task", "b")
+			r := sampleResponse()
+			r.Proyecto, r.Ts = tc.project, tc.ts
+			if _, err := insertResponse(db, r); err != nil {
+				t.Fatal(err)
+			}
+			var link sql.NullInt64
+			if err := db.QueryRow("SELECT entry_id FROM responses").Scan(&link); err != nil {
+				t.Fatal(err)
+			}
+			if link.Valid != (tc.want != 0) || link.Int64 != tc.want {
+				t.Fatalf("entry link=%+v, want %d", link, tc.want)
+			}
+		})
 	}
 }
 

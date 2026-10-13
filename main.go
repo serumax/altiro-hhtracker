@@ -197,7 +197,7 @@ func hhStartHandler(db *sql.DB) server.ToolHandlerFunc {
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"✅ Entrada #%d abierta\n   %s [%s] — %s",
 			id, descripcion, proyecto, inicio[:16],
-		)), nil
+		) + entryOverlapWarning(db, id)), nil
 	}
 }
 
@@ -226,7 +226,7 @@ func hhCloseHandler(db *sql.DB) server.ToolHandlerFunc {
 			"✅ Entrada #%d cerrada\n   %s [%s]\n   %s → %s%s",
 			entry.ID, entry.Descripcion, entry.Proyecto,
 			entry.Inicio[:16], finStr, durStr,
-		)), nil
+		) + entryOverlapWarning(db, entry.ID)), nil
 	}
 }
 
@@ -271,7 +271,7 @@ func hhUpdateHandler(db *sql.DB) server.ToolHandlerFunc {
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"✏️  Entrada #%d actualizada\n   %s [%s] %s%s",
 			entry.ID, entry.Descripcion, entry.Proyecto, entry.Inicio[:16], durStr,
-		)), nil
+		) + entryOverlapWarning(db, entry.ID)), nil
 	}
 }
 
@@ -354,7 +354,7 @@ func hhManualHandler(db *sql.DB) server.ToolHandlerFunc {
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"✅ Entrada manual #%d registrada\n   %s [%s]%s",
 			entry.ID, entry.Descripcion, entry.Proyecto, durStr,
-		)), nil
+		) + entryOverlapWarning(db, entry.ID)), nil
 	}
 }
 
@@ -578,4 +578,20 @@ func normalizeTimestamp(s string) string {
 	// Assume HH:MM — prepend today's date.
 	today := time.Now().Format("2006-01-02")
 	return today + "T" + s + ":00.000000"
+}
+
+// Warning only: recording remains successful and other rows are never altered.
+func entryOverlapWarning(db *sql.DB, id int64) string {
+	entry, err := getEntry(db, id)
+	if err != nil {
+		return "\nWarning: overlap check unavailable."
+	}
+	ids, err := overlappingEntryIDs(db, entry)
+	if err != nil {
+		return "\nWarning: overlap check unavailable."
+	}
+	if len(ids) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\nWarning: time overlap with entries %v. Review human hours; no other entries were changed.", ids)
 }

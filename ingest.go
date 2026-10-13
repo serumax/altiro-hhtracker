@@ -171,17 +171,28 @@ func ingestOpencode(db *sql.DB, srcPath string, now time.Time) (int, error) {
 		}
 
 		proyecto := ""
-		if projectName.Valid && projectName.String != "" {
-			proyecto = projectName.String
-		} else if directory.Valid && directory.String != "" {
-			proyecto = resolveProyecto(directory.String)
-		} else if m.Path.Cwd != "" {
-			proyecto = resolveProyecto(m.Path.Cwd)
+		// The repository marker is canonical; client display names are only fallback.
+		for _, dir := range []string{directory.String, m.Path.Cwd} {
+			if dir == "" {
+				continue
+			}
+			root := dir
+			if checkout, err := mainCheckoutRoot(dir); err == nil {
+				root = checkout
+			}
+			if pf, ok := findProjectFile(root); ok && pf.Proyecto != "" {
+				proyecto = pf.Proyecto
+				break
+			}
 		}
-
-		entryID, err := singleOpenEntryID(db)
-		if err != nil {
-			return inserted, err
+		if proyecto == "" {
+			if projectName.Valid && projectName.String != "" {
+				proyecto = projectName.String
+			} else if directory.Valid && directory.String != "" {
+				proyecto = resolveProyecto(directory.String)
+			} else if m.Path.Cwd != "" {
+				proyecto = resolveProyecto(m.Path.Cwd)
+			}
 		}
 
 		r := Response{
@@ -195,7 +206,6 @@ func ingestOpencode(db *sql.DB, srcPath string, now time.Time) (int, error) {
 			TokensCacheWrite: m.Tokens.Cache.Write,
 			TokensCacheRead:  m.Tokens.Cache.Read,
 			CostoUSD:         m.Cost,
-			EntryID:          entryID,
 			Source:           "opencode",
 			ExternalID:       id,
 		}
@@ -335,11 +345,6 @@ func ingestClaudeFile(db *sql.DB, path string) (int, error) {
 			dur = sql.NullFloat64{Float64: tsParsed.Sub(lastUser).Seconds(), Valid: true}
 		}
 
-		entryID, err := singleOpenEntryID(db)
-		if err != nil {
-			return inserted, err
-		}
-
 		r := Response{
 			Ts:               tsParsed.Local().Format(tsLayout),
 			Proyecto:         resolveProyecto(cl.Cwd),
@@ -351,7 +356,6 @@ func ingestClaudeFile(db *sql.DB, path string) (int, error) {
 			TokensCacheWrite: cl.Message.Usage.CacheCreationInputTokens,
 			TokensCacheRead:  cl.Message.Usage.CacheReadInputTokens,
 			CostoUSD:         0,
-			EntryID:          entryID,
 			Source:           "claude-code",
 			ExternalID:       cl.Message.ID,
 		}
