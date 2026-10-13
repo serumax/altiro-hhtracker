@@ -79,7 +79,7 @@ func main() {
 			mcp.Description("Descripción breve del trabajo.")),
 		mcp.WithString("proyecto",
 			mcp.Description("Nombre del proyecto (default: general).")),
-	), withActivity(db, hhStartHandler(db)))
+	), hhStartHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_close",
 		mcp.WithDescription("Cierra una entrada abierta y registra la duración total."),
@@ -87,17 +87,17 @@ func main() {
 			mcp.Description("ID de la entrada abierta a cerrar.")),
 		mcp.WithString("resumen",
 			mcp.Description("Resumen opcional del trabajo realizado.")),
-	), withActivity(db, hhCloseHandler(db)))
+	), hhCloseHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_status",
 		mcp.WithDescription("Lista todas las entradas actualmente abiertas."),
-	), withActivity(db, hhStatusHandler(db)))
+	), hhStatusHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_delete",
 		mcp.WithDescription("Borra una entrada por ID (abierta o cerrada)."),
 		mcp.WithNumber("entry_id", mcp.Required(),
 			mcp.Description("ID de la entrada a borrar.")),
-	), withActivity(db, hhDeleteHandler(db)))
+	), hhDeleteHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_update",
 		mcp.WithDescription("Actualiza campos de una entrada existente. Solo se pasan los campos a cambiar."),
@@ -115,7 +115,7 @@ func main() {
 			mcp.Description("Nuevo resumen.")),
 		mcp.WithNumber("duracion_hh",
 			mcp.Description("Duración explícita en horas. Si se omite y hay inicio y fin, se recalcula.")),
-	), withActivity(db, hhUpdateHandler(db)))
+	), hhUpdateHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_report",
 		mcp.WithDescription("Lista las entradas cerradas en un rango de fechas opcional."),
@@ -125,7 +125,7 @@ func main() {
 			mcp.Description("Fecha de fin YYYY-MM-DD (inclusive).")),
 		mcp.WithString("proyecto",
 			mcp.Description("Filtra por proyecto (opcional).")),
-	), withActivity(db, hhReportHandler(db)))
+	), hhReportHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_manual",
 		mcp.WithDescription("Registra una entrada de tiempo manualmente."),
@@ -139,7 +139,7 @@ func main() {
 			mcp.Description("Duración en horas fraccionarias.")),
 		mcp.WithString("resumen",
 			mcp.Description("Resumen opcional.")),
-	), withActivity(db, hhManualHandler(db)))
+	), hhManualHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_semana",
 		mcp.WithDescription("Reporte de horas de la semana."),
@@ -147,7 +147,7 @@ func main() {
 			mcp.Description("Desplazamiento de semana (0=esta semana, -1=semana pasada).")),
 		mcp.WithString("proyecto",
 			mcp.Description("Filtra por proyecto (opcional).")),
-	), withActivity(db, hhSemanaHandler(db)))
+	), hhSemanaHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_mes",
 		mcp.WithDescription("Reporte de horas del mes."),
@@ -155,7 +155,7 @@ func main() {
 			mcp.Description("Desplazamiento de mes (0=este mes, -1=mes pasado).")),
 		mcp.WithString("proyecto",
 			mcp.Description("Filtra por proyecto (opcional).")),
-	), withActivity(db, hhMesHandler(db)))
+	), hhMesHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_costos",
 		mcp.WithDescription("Reporte de costo y tokens de respuestas de agentes, agrupado por proyecto y modelo."),
@@ -167,7 +167,21 @@ func main() {
 			mcp.Description("Filtra por proyecto (opcional).")),
 		mcp.WithString("modelo",
 			mcp.Description("Filtra por modelo (opcional).")),
-	), withActivity(db, hhCostosHandler(db)))
+	), hhCostosHandler(db))
+
+	s.AddTool(mcp.NewTool("hh_tracking",
+		mcp.WithDescription("Check shared project context using confirmed root human events. Never opens or closes hour entries. Initialize missing projects or resolve continuity questions using the owning claim token."),
+		mcp.WithString("action", mcp.Description("check (default), initialize or resolve")),
+		mcp.WithString("project", mcp.Description("Confirmed canonical project name; cwd marker takes precedence")),
+		mcp.WithString("cwd", mcp.Description("Local workspace directory; initialized context is reused across chats")),
+		mcp.WithString("client", mcp.Required()),
+		mcp.WithString("chat", mcp.Required()),
+		mcp.WithString("event_id", mcp.Required(), mcp.Description("Stable ID of the originating event, reused on retries; not a human session ID")),
+		mcp.WithString("event_type", mcp.Description("human_prompt only for an actual human message; tool, stop and unknown never advance human time")),
+		mcp.WithBoolean("confirmed_human", mcp.Description("Explicit provenance assertion, not inferred from a tool invocation")),
+		mcp.WithBoolean("root", mcp.Description("Only the root orchestrator may assert ownership, never a subagent")),
+		mcp.WithString("claim_token", mcp.Description("Owning chat token from the pending question; required to resolve")),
+	), hhTrackingHandler(db, cfg))
 
 	startWorker(db, cfg)
 
@@ -594,4 +608,23 @@ func entryOverlapWarning(db *sql.DB, id int64) string {
 		return ""
 	}
 	return fmt.Sprintf("\nWarning: time overlap with entries %v. Review human hours; no other entries were changed.", ids)
+}
+
+func hhTrackingHandler(db *sql.DB, cfg Config) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		input := TrackingInput{
+			Action: req.GetString("action", "check"), Project: req.GetString("project", ""), Cwd: req.GetString("cwd", ""),
+			Client: req.GetString("client", ""), Chat: req.GetString("chat", ""), EventID: req.GetString("event_id", ""),
+			EventType: req.GetString("event_type", "unknown"), ConfirmedHuman: req.GetBool("confirmed_human", false), Root: req.GetBool("root", false), ClaimToken: req.GetString("claim_token", ""),
+		}
+		result, err := trackProject(db, input, time.Now(), time.Duration(cfg.HumanReminderMinutes)*time.Minute)
+		if err != nil {
+			return mcp.NewToolResultText(fmt.Sprintf("ERROR: %v", err)), nil
+		}
+		body, err := json.Marshal(result)
+		if err != nil {
+			return mcp.NewToolResultText(fmt.Sprintf("ERROR: %v", err)), nil
+		}
+		return mcp.NewToolResultText(string(body)), nil
+	}
 }

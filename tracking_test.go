@@ -1,0 +1,380 @@
+package main
+
+import (
+	"database/sql"
+	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+)
+
+func humanEvent(project, chat, event string) TrackingInput {
+	return TrackingInput{Project: project, Client: "test", Chat: chat, EventID: event, EventType: "human_prompt", ConfirmedHuman: true, Root: true}
+}
+
+func trackAt(t *testing.T, db *sql.DB, input TrackingInput, now time.Time) TrackingResult {
+	t.Helper()
+	result, err := trackProject(db, input, now, 2*time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return result
+}
+
+func initializeAt(t *testing.T, db *sql.DB, project string, now time.Time) TrackingResult {
+	t.Helper()
+	input := humanEvent(project, "first-chat", "init-"+project)
+	input.Action = "initialize"
+	result := trackAt(t, db, input, now)
+	if !result.Initialized || result.Pending != "" {
+		t.Fatalf("initialization: %+v", result)
+	}
+	return result
+}
+
+func TestTrackingInitializedProjectSharedAcrossChats(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	initial := initializeAt(t, db, "project", now)
+	id, _, _ := insertOpen(db, "task", "project")
+	for i := 0; i < 4; i++ {
+		result := trackAt(t, db, humanEvent("project", fmt.Sprintf("chat-%d", i), fmt.Sprintf("event-%d", i)), now.Add(time.Duration(i+1)*time.Minute))
+		if result.ContextID != initial.ContextID || !result.Initialized || result.Ask || result.Pending != "" || len(result.TaskIDs) != 1 || result.TaskIDs[0] != id {
+			t.Fatalf("chat repeats initialization or loses tasks: %+v", result)
+		}
+	}
+	other := trackAt(t, db, humanEvent("other-project", "chat", "new"), now)
+	if other.Initialized || !other.Ask || other.Pending != "initialize" {
+		t.Fatalf("new project should ask: %+v", other)
+	}
+}
+
+func TestTrackingGapBoundaryAndPendingSurvivesActivity(t *testing.T) {
+	for _, minutes := range []int{119, 120} {
+		t.Run(fmt.Sprint(minutes), func(t *testing.T) {
+			db := openTestDB(t)
+			now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+			initializeAt(t, db, "project", now)
+			result := trackAt(t, db, humanEvent("project", "chat", "return"), now.Add(time.Duration(minutes)*time.Minute))
+			if result.Ask != (minutes == 120) || (result.Pending != "") != (minutes == 120) {
+				t.Fatalf("boundary: %+v", result)
+			}
+			if result.LastHumanAt != now.Add(time.Duration(minutes)*time.Minute).UnixMilli() {
+				t.Fatal("human activity not advanced after comparison")
+			}
+			if minutes == 120 {
+				next := trackAt(t, db, humanEvent("project", "chat", "next"), now.Add(121*time.Minute))
+				if next.Pending != "continuity" || next.Ask {
+					t.Fatalf("pending was cleared or repeated: %+v", next)
+				}
+				resolve := humanEvent("project", "chat", "resolve")
+				resolve.Action = "resolve"
+				resolve.ClaimToken = result.ClaimToken
+				resolved := trackAt(t, db, resolve, now.Add(122*time.Minute))
+				if resolved.Pending != "" || resolved.Ask {
+					t.Fatalf("explicit resolution: %+v", resolved)
+				}
+			}
+		})
+	}
+}
+
+func TestTrackingBotUnknownAndSubagentCannotAdvanceOrResolve(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	initial := initializeAt(t, db, "project", now)
+	for i, input := range []TrackingInput{
+		{EventType: "tool", Root: true, ConfirmedHuman: true},
+		{EventType: "human_prompt", Root: true},
+		{EventType: "human_prompt", ConfirmedHuman: true},
+		{EventType: "stop", Root: true, ConfirmedHuman: true},
+	} {
+		input.Project, input.Client, input.Chat, input.EventID = "project", "test", "bot", fmt.Sprint(i)
+		result := trackAt(t, db, input, now.Add(3*time.Hour))
+		if result.LastHumanAt != initial.LastHumanAt || result.Pending != "" || result.Ask {
+			t.Fatalf("unconfirmed activity treated as human: %+v", result)
+		}
+		input.Action = "resolve"
+		input.EventID += "resolve"
+		if _, err := trackProject(db, input, now.Add(3*time.Hour), 2*time.Hour); err == nil {
+			t.Fatal("unconfirmed caller resolved tracking")
+		}
+	}
+	returned := trackAt(t, db, humanEvent("project", "chat", "human-return"), now.Add(3*time.Hour))
+	if !returned.Ask || returned.Pending != "continuity" {
+		t.Fatalf("bots concealed human gap: %+v", returned)
+	}
+}
+
+func TestTrackingReplayCannotAdvanceOrAskAgain(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	input := humanEvent("project", "chat", "one")
+	first := trackAt(t, db, input, now)
+	if !first.Ask || first.ClaimToken == "" {
+		t.Fatalf("missing initial question: %+v", first)
+	}
+	replay := trackAt(t, db, input, now.Add(3*time.Hour))
+	if !replay.Replay || replay.Ask || replay.LastHumanAt != first.LastHumanAt {
+		t.Fatalf("replay changed tracking: %+v", replay)
+	}
+	next := trackAt(t, db, humanEvent("project", "chat", "two"), now.Add(3*time.Hour))
+	if !next.Ask || next.Pending != "initialize" || next.ClaimToken == first.ClaimToken {
+		t.Fatalf("expired claim not renewed: %+v", next)
+	}
+	stale := humanEvent("project", "chat", "stale")
+	stale.Action = "initialize"
+	stale.ClaimToken = first.ClaimToken
+	if _, err := trackProject(db, stale, now.Add(3*time.Hour), 2*time.Hour); err == nil {
+		t.Fatal("stale claim initialized context")
+	}
+}
+
+func TestTrackingConcurrentClaimsAcrossProcesses(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "hh.db")
+	db1, err := openDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db1.Close()
+	db2, err := openDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db2.Close()
+	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	initializeAt(t, db1, "project", now)
+	results := make(chan TrackingResult, 8)
+	failures := make(chan error, 8)
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			<-start
+			db := db1
+			if i%2 == 1 {
+				db = db2
+			}
+			result, err := trackProject(db, humanEvent("project", fmt.Sprint(i), fmt.Sprint(i)), now.Add(2*time.Hour), 2*time.Hour)
+			if err != nil {
+				failures <- err
+			}
+			results <- result
+		}(i)
+	}
+	close(start)
+	wg.Wait()
+	close(results)
+	close(failures)
+	for err := range failures {
+		t.Error(err)
+	}
+	asks := 0
+	for result := range results {
+		if result.Ask {
+			asks++
+		}
+	}
+	if asks != 1 {
+		t.Fatalf("question owners=%d, want 1", asks)
+	}
+}
+
+func TestTrackingRestartAndWorkspaceInitialization(t *testing.T) {
+	cwd := t.TempDir()
+	path := filepath.Join(t.TempDir(), "hh.db")
+	db, err := openDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	unknown := humanEvent("", "chat", "unknown")
+	unknown.Cwd = cwd
+	first := trackAt(t, db, unknown, now)
+	if first.Initialized || !first.Ask {
+		t.Fatalf("uninitialized workspace: %+v", first)
+	}
+	init := humanEvent("canonical", "chat", "init")
+	init.Cwd = cwd
+	init.Action = "initialize"
+	init.ClaimToken = first.ClaimToken
+	initialized := trackAt(t, db, init, now.Add(time.Minute))
+	db.Close()
+	db, err = openDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	returned := humanEvent("", "another-chat", "return")
+	returned.Cwd = cwd
+	shared := trackAt(t, db, returned, now.Add(2*time.Minute))
+	if shared.ContextID != initialized.ContextID || !shared.Initialized || shared.Project != "canonical" || shared.Ask {
+		t.Fatalf("restart lost workspace binding: %+v", shared)
+	}
+	returned.EventID = "gap"
+	gap := trackAt(t, db, returned, now.Add(3*time.Hour))
+	if !gap.Ask || gap.Pending != "continuity" {
+		t.Fatalf("gap lost: %+v", gap)
+	}
+	db.Close()
+	db, err = openDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	returned.EventID = "pending"
+	pending := trackAt(t, db, returned, now.Add(3*time.Hour+time.Minute))
+	if pending.Ask || pending.Pending != "continuity" || pending.ClaimToken != gap.ClaimToken {
+		t.Fatalf("pending/claim lost on restart: %+v", pending)
+	}
+}
+
+func TestTrackingCanonicalMarkerInitializesWithoutGenericQuestion(t *testing.T) {
+	db := openTestDB(t)
+	cwd := t.TempDir()
+	if err := os.WriteFile(filepath.Join(cwd, projectFileName), []byte("---\nproyecto: canonical\n---\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	input := humanEvent("wrong-name", "chat", "first")
+	input.Cwd = cwd
+	result := trackAt(t, db, input, time.Now())
+	if result.Project != "canonical" || !result.Initialized || result.Ask {
+		t.Fatalf("marker not reused: %+v", result)
+	}
+}
+
+func TestTrackingReadyProjectWithNoTasksDoesNotAsk(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	initializeAt(t, db, "project", now)
+	result := trackAt(t, db, humanEvent("project", "new-chat", "one"), now.Add(time.Minute))
+	if result.Ask || result.Pending != "" || len(result.TaskIDs) != 0 {
+		t.Fatalf("empty ready project asked generically: %+v", result)
+	}
+}
+
+func TestTrackingOtherProjectActivityCannotMaskGap(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	initializeAt(t, db, "a", now)
+	initializeAt(t, db, "b", now)
+	trackAt(t, db, humanEvent("b", "chat", "active"), now.Add(119*time.Minute))
+	result := trackAt(t, db, humanEvent("a", "chat", "return"), now.Add(120*time.Minute))
+	if !result.Ask || result.Pending != "continuity" {
+		t.Fatalf("other project hid gap: %+v", result)
+	}
+}
+
+func TestTrackingExpiredClaimTransfersWithoutChangingHours(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	initializeAt(t, db, "project", now)
+	id, _, _ := insertOpen(db, "human work", "project")
+	before, _ := getEntry(db, id)
+	first := trackAt(t, db, humanEvent("project", "first", "gap"), now.Add(2*time.Hour))
+	observer := humanEvent("project", "second", "observer")
+	observer.Root = false
+	pending := trackAt(t, db, observer, now.Add(121*time.Minute))
+	if pending.Pending != "continuity" || pending.Ask || pending.ClaimToken != "" || pending.LastHumanAt != first.LastHumanAt {
+		t.Fatalf("observer changed pending: %+v", pending)
+	}
+	claimed := trackAt(t, db, humanEvent("project", "second", "claim"), now.Add(125*time.Minute))
+	if !claimed.Ask || claimed.ClaimToken == first.ClaimToken {
+		t.Fatalf("claim did not transfer at expiry: %+v", claimed)
+	}
+	stale := humanEvent("project", "first", "old-answer")
+	stale.Action = "resolve"
+	stale.ClaimToken = first.ClaimToken
+	if _, err := trackProject(db, stale, now.Add(126*time.Minute), 2*time.Hour); err == nil {
+		t.Fatal("old owner resolved new claim")
+	}
+	answer := humanEvent("project", "second", "answer")
+	answer.Action = "resolve"
+	answer.ClaimToken = claimed.ClaimToken
+	resolved := trackAt(t, db, answer, now.Add(126*time.Minute))
+	if resolved.Pending != "" {
+		t.Fatalf("pending not resolved: %+v", resolved)
+	}
+	after, _ := getEntry(db, id)
+	if after != before {
+		t.Fatalf("continuity resolution altered human time: %+v", after)
+	}
+}
+
+func TestTrackingLegacyHistoryAndTechnicalMetaRemainUnchanged(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "legacy.db")
+	legacy, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = legacy.Exec(`CREATE TABLE entries (id INTEGER PRIMARY KEY,descripcion TEXT NOT NULL,proyecto TEXT NOT NULL,inicio TEXT NOT NULL,fin TEXT,duracion_hh REAL,resumen TEXT,estado TEXT NOT NULL); INSERT INTO entries VALUES (1,'legacy','project','2026-08-01T09:00:00','2026-08-01T10:00:00',1,'old','cerrado')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	legacy.Close()
+	db, err := openDB(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	before, _ := getEntry(db, 1)
+	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	initializeAt(t, db, "project", now)
+	if err := setMeta(db, "last_tool_call_at", now.Add(119*time.Minute).Local().Format(tsLayout)); err != nil {
+		t.Fatal(err)
+	}
+	result := trackAt(t, db, humanEvent("project", "chat", "return"), now.Add(2*time.Hour))
+	if !result.Ask {
+		t.Fatal("legacy technical activity reset human clock")
+	}
+	after, _ := getEntry(db, 1)
+	if after != before {
+		t.Fatal("legacy migration changed hours")
+	}
+}
+
+func TestTrackingInvalidMetadataAndReplayBindingCannotMutate(t *testing.T) {
+	db := openTestDB(t)
+	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	initializeAt(t, db, "project", now)
+	input := humanEvent("project", "chat", "event")
+	first := trackAt(t, db, input, now.Add(time.Minute))
+	input.Project = "another-project"
+	if _, err := trackProject(db, input, now.Add(3*time.Hour), 2*time.Hour); err == nil {
+		t.Fatal("replay changed project binding")
+	}
+	input = humanEvent("project", "chat", "")
+	if _, err := trackProject(db, input, now.Add(3*time.Hour), 2*time.Hour); err == nil {
+		t.Fatal("missing event identity accepted")
+	}
+	input.EventID = "after-errors"
+	result := trackAt(t, db, input, now.Add(2*time.Minute))
+	if result.Pending != "" || result.LastHumanAt <= first.LastHumanAt {
+		t.Fatalf("invalid input affected tracking: %+v", result)
+	}
+	var count int
+	db.QueryRow("SELECT count(*) FROM tracking_contexts").Scan(&count)
+	if count != 1 {
+		t.Fatalf("failed replay left context behind: %d", count)
+	}
+}
+
+func TestTrackingMarkerConfirmationPreservesPreviousHumanTime(t *testing.T) {
+	db := openTestDB(t)
+	cwd := t.TempDir()
+	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
+	input := humanEvent("", "chat", "initial")
+	input.Cwd = cwd
+	trackAt(t, db, input, now)
+	if err := os.WriteFile(filepath.Join(cwd, projectFileName), []byte("---\nproyecto: canonical\n---\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	input.EventID = "return"
+	result := trackAt(t, db, input, now.Add(3*time.Hour))
+	if !result.Initialized || !result.Ask || result.Pending != "continuity" {
+		t.Fatalf("marker confirmation concealed previous human gap: %+v", result)
+	}
+}

@@ -1,6 +1,6 @@
 # altiro-hhtracker
 
-Work-hours MCP tracker for AI coding sessions. Tracks time spent on requirements,
+Human work-hours MCP tracker by project and task. Tracks time spent on requirements,
 generates reports by week, month, or custom date range, and records token and
 cost metrics for every agent response.
 
@@ -32,6 +32,7 @@ server for you. The server injects its usage instructions automatically on conne
 
 | Tool | Description |
 |---|---|
+| `hh_tracking(...)` | Check/initialize shared project context or resolve continuity questions |
 | `hh_start(descripcion, proyecto)` | Open a time entry |
 | `hh_close(entry_id, resumen?)` | Close and report duration |
 | `hh_status()` | Show open entries |
@@ -105,15 +106,42 @@ While connected, the server ingests one row per agent response into
   the API message id. Cost is recorded as `0` (subscription).
 
 Each row carries the timestamp, project, client, model, response duration,
-input / output / cache tokens, cost, and the entry that was open at the time.
+input / output / cache tokens, cost, and an unambiguous matching project/time entry when available.
 Query it with `hh_costos`. The first run backfills the full history.
 
-## Idle auto-close
+## Human project tracking
 
-An open entry with no activity for about ten minutes is closed automatically with
-the note "cerrada automáticamente por inactividad". The agent is expected to ask
-you first, around the five-minute mark. Activity means any ingested response or
-any `hh_*` tool call.
+Initialized project context is persistent and shared across its chats. A canonical
+`.hh-tracker.md` initializes that identity automatically; a human-confirmed explicit
+project name can initialize it through `hh_tracking(action="initialize", ...)`.
+A reused chat is not a new human work session. New task requests already supply
+the task description, so an initialized project does not ask the generic question
+again merely because it has no open task.
+
+`hh_tracking` checks metadata from a confirmed **root human prompt**. At the next
+such interaction after at least 120 minutes without one in that project, it requests
+continuity clarification. The previous timestamp is checked before advancing it.
+Pending clarification survives other messages and restarts until explicitly
+resolved with the question owner's claim token. One chat owns a question for five
+minutes; abandoned claims can be recovered by a later confirmed human event.
+Stable event IDs deduplicate retries, while technical chat/session IDs only identify
+the conversation. No prompt text is stored.
+
+Assistant messages, subagent completion, tool calls, Stop and unknown events never
+advance the human clock. Root/human flags are provenance assertions from the adapter
+or orchestrator, **not an authentication boundary**. The root orchestrator alone
+records task start and completion, including verification; delegated agents only
+report. Checking or resolving context never opens/closes tasks or changes HH times.
+
+**No human HH entry is closed by inactivity.** Silence may include human thinking,
+research or other work. Manual recording and corrections remain available.
+`idle_close_minutes` is deprecated and ignored, regardless of its previous value.
+The background worker only imports response metrics. Existing HH/history is preserved.
+
+Without a verified client event adapter, the root assistant must call `hh_tracking`
+following the injected instructions. The server does not wake inactive chats or
+promise delivery of a prompt exactly two hours later. Codex event integration is
+not yet installed by this tracking-core change.
 
 ## Configuration
 
@@ -123,9 +151,14 @@ is absent.
 
 ```json
 {
-  "idle_close_minutes": 10,
+  "human_reminder_minutes": 120,
   "ingest_enabled": true,
   "opencode_db_path": "/Users/you/.local/share/opencode/opencode.db",
   "claude_projects_dir": "/Users/you/.claude/projects"
 }
 ```
+
+`human_reminder_minutes` must be positive and representable as a duration; invalid
+values fall back to 120. The setting controls clarification on human return, not
+a timer or automatic close. Keep the server's local timezone consistent with the
+user's timezone for hour-entry timestamps.

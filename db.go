@@ -47,6 +47,31 @@ CREATE TABLE IF NOT EXISTS ingest_state (
 	watermark  TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS tracking_contexts (
+ scope TEXT PRIMARY KEY,
+ project TEXT NOT NULL,
+ initialized INTEGER NOT NULL DEFAULT 0,
+ last_human_at INTEGER,
+ pending TEXT NOT NULL DEFAULT '',
+ claim_owner TEXT NOT NULL DEFAULT '',
+ claim_token TEXT NOT NULL DEFAULT '',
+ claim_expires_at INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS tracking_workspaces (
+ cwd TEXT PRIMARY KEY,
+ scope TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tracking_events (
+ client TEXT NOT NULL,
+ chat TEXT NOT NULL,
+ event_id TEXT NOT NULL,
+ action TEXT NOT NULL,
+ scope TEXT NOT NULL,
+ PRIMARY KEY (client, chat, event_id, action)
+);
+
 CREATE TABLE IF NOT EXISTS meta (
 	key   TEXT PRIMARY KEY,
 	value TEXT NOT NULL

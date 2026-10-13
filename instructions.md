@@ -1,48 +1,97 @@
 # hh-tracker — MCP Server Instructions
 
-You have a work-hours tracking tool. Use it automatically according to these rules.
+Track the user's HUMAN work hours by project and task. Assistant response metrics
+are separate. These rules apply to the root orchestrator: delegated agents report
+their work to it and do not start, close, update, delete or manually record HH.
+This is a collaboration policy, not caller authentication.
 
-## Session Start
+## Project context across chats
 
-Call `hh_status()` at the beginning of every session. If there are open entries, report them to the user. If there are no open entries, ask: "¿En qué requerimiento vamos a trabajar hoy?" and call `hh_start(descripcion, proyecto)` with the answer.
+A human work session is not a new chat, technical session ID, or project switch.
+One initialized project can have many chats and tasks, including chats opened on
+previous days. Reuse its canonical tracking context across all of them.
 
-## Project Name
+On the first human request you handle, and each subsequent human request, call
+`hh_tracking(action="check", project?, cwd?, client, chat, event_id,
+event_type="human_prompt", confirmed_human=true, root=true)` only when you can
+confirm that the originating message is actually from the human and you are the
+root orchestrator. Reuse that message's stable event ID on retries. A technical
+chat/session ID identifies the conversation; it is not a new human work session.
 
-Before calling `hh_start`, `hh_close` or `hh_manual`, look for a `.hh-tracker.md`
-file at the repository root (run `altiro-hhtracker init` once per project to
-create it). When it exists, use its `proyecto:` value verbatim as the `proyecto`
-argument. This keeps hour entries and the automatic response metrics under the
-same name. When there is no such file, fall back to the repository or product
-name (e.g. "demo-app", "n8n-demo", "general").
+If provenance cannot be confirmed, use `event_type="unknown"` and
+`confirmed_human=false`. Tool calls, assistant output, subagent completion and
+Stop events are not human interaction. Never fabricate provenance to reset idle.
 
-## During Work
+Use `.hh-tracker.md` at the repository's primary checkout root when present.
+Its `proyecto` value is canonical and overrides client display names. A known
+marker initializes context without asking a generic question. When context is
+already initialized, the user's task request supplies the task description; do
+not repeatedly ask what to work on merely because no task is open.
 
-- Call `hh_start(descripcion, proyecto)` when a new distinct requirement begins.
-- One entry per requirement. Do not open multiple entries for the same task.
+If the result has `pending="initialize"` and `ask=true`, ask the user once which
+project the work belongs to, in their current language. After confirmation call
+`hh_tracking(action="initialize", project=<confirmed name>, ...,
+claim_token=<returned token>)` using the same client/chat identity and a stable
+ID for the confirmation message. Explicit project initialization persists across
+restarts and reused chats. It does not automatically start an hour entry.
 
-## Idle Entries
+`context_id` is shared project context. `task_ids` lists existing open entries in
+that project, not the current chat's task. Reuse only the entry ID you know belongs
+to the task; do not adopt an arbitrary open entry from another chat.
 
-An open entry left without activity should not run forever. When `hh_status`
-shows an open entry and roughly five minutes have passed with no interaction,
-ask the user whether to close it.
+## Two-hour continuity check
 
-- The user confirms ("ok", "sí", "dale", "ciérrala") → call `hh_close`.
-- The user says anything else, brings up a new requirement, or asks for
-  something more → leave the entry open and let the inactivity count restart.
-- The user does not answer → do nothing; the server itself closes the entry
-  after about ten minutes of total inactivity, as a safety net.
+On the next confirmed human interaction after at least 120 minutes without one
+in this project, `hh_tracking` sets `pending="continuity"`. The threshold can be
+configured. Only the chat that receives `ask=true` asks the continuity question:
+was the user still working on this project during the interval?
 
-## Closing Entries
+Silence is NOT evidence that human work stopped. Never automatically close,
+subtract, add or backdate hours because of an idle interval. Bot/tool activity
+and work in another project do not reset this project's human clock.
 
-Call `hh_close(entry_id, resumen?)` when the user signals the work is done. Trigger words include: "listo", "cerramos", "ok" at the end of a task, "terminamos", "eso era todo". Report: start time, end time, and total duration.
+Pending clarification remains until the human answers. Other chats and duplicate
+events must not ask again while a question claim is active. Claims expire after
+five minutes so another confirmed human interaction can recover an abandoned
+question. The owning chat can retrieve its claim token without asking again.
+Resolve a continuity question with `hh_tracking(action="resolve", ...,
+claim_token=<owning token>)` after explicit human confirmation. Resolution changes
+context only, never HH timestamps. Use the existing manual/update tools for any
+human-authorized correction. If a token is expired or stale, check again.
 
-## Manual Registration
+## Task start and completion
 
-Use `hh_manual` when the user reports time that has already passed:
+- The root orchestrator calls `hh_start(descripcion, proyecto)` at the start of a
+  distinct authorized task, using the already-known project and task description.
+- Avoid duplicate starts on retries or chat reuse; inspect `hh_status()` and retain
+  the exact entry ID for this task. Do not infer that all open tasks are yours.
+- Close that entry with `hh_close(entry_id, resumen)` when the full task is finished,
+  including its applicable implementation, verification and final work summary,
+  or when the human explicitly asks to close it.
+- Completing an assistant turn, receiving an agent report, reaching Stop, switching
+  projects or becoming silent does not itself mean the human task is complete.
+- Do not sum parallel agents' runtimes into human hours. The root orchestrator owns
+  one coherent task interval and reports overlaps for human review.
+- If another task begins, complete/close the prior task only when its actual scope
+  is finished or the human confirms the switch. Do not silently discard unfinished
+  work. Multiple chats may have distinct ongoing tasks in the same project.
 
-- With explicit times: `hh_manual(descripcion, proyecto, inicio="09:00", fin="10:30")`
-- With duration: `hh_manual(descripcion, proyecto, duracion_hh=1.5)`
-- If the user gives only HH:MM, assume today's date.
+Report the recorded start, end and duration when closing. Automatic task intervals
+are time/context anchors for human work, not a claim to measure human attention.
+
+## Manual registration and correction
+
+Use `hh_manual` for human-reported past work outside the chat or missed intervals:
+
+- Timestamp pair: `hh_manual(descripcion, proyecto, inicio="09:00", fin="10:30")`.
+- Duration alone: `hh_manual(descripcion, proyecto, duracion_hh=1.5)`.
+- HH:MM uses today's local date; ask for the date when the work was on another day.
+- Use `hh_update` for confirmed corrections. Setting `fin` does not close an entry;
+  use `hh_close` for the close transition. `hh_delete` is permanent, no undo.
+- Overlap warnings are advisory; do not alter another record without authorization.
+
+Never invent times or durations. Preserve the user's ability to include thinking,
+research and other work that did not involve interaction with an assistant.
 
 ## Reports
 
@@ -53,12 +102,14 @@ Use `hh_manual` when the user reports time that has already passed:
 | This month | `hh_mes()` |
 | Last month | `hh_mes(offset=-1)` |
 | A date range | `hh_report(desde="YYYY-MM-DD", hasta="YYYY-MM-DD")` |
-| Token / cost of agent responses | `hh_costos(desde?, hasta?, proyecto?, modelo?)` |
+| Assistant tokens/cost, not human hours | `hh_costos(desde?, hasta?, proyecto?, modelo?)` |
 
-## Rules
+Recording is bookkeeping; never let it replace the requested answer. Record task
+completion before the final user-facing reply and report any recording failure
+honestly. Timestamps use the process's local timezone; configure it consistently
+with the user's timezone (for Chile, America/Santiago).
 
-- Never invent durations or timestamps. Only record what the user explicitly tells you or what the clock confirms.
-- Never close an entry without calling `hh_close`. Do not assume an entry is closed.
-- If the user changes tasks mid-session, close the current entry first, then open a new one.
-- Saving to hh-tracker is bookkeeping — it never replaces the actual answer to the user. Always deliver the answer, then save.
-- Times are in the user's local timezone. For Chilean users, that is America/Santiago.
+The server stores state and coordinates questions, but cannot force a client to
+invoke a tool or wake an inactive chat. Without a verified event adapter, these
+checks depend on the root orchestrator following the instructions. Do not promise
+that an unsupported client automatically delivers start or idle notifications.

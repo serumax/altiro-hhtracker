@@ -17,8 +17,8 @@ func TestLoadConfigDefaults(t *testing.T) {
 	if cfg.ClaudeProjectsDir != filepath.Join(home, ".claude", "projects") {
 		t.Errorf("ClaudeProjectsDir = %q", cfg.ClaudeProjectsDir)
 	}
-	if cfg.IdleCloseMinutes != 10 {
-		t.Errorf("IdleCloseMinutes = %d, want 10", cfg.IdleCloseMinutes)
+	if cfg.HumanReminderMinutes != 120 {
+		t.Errorf("HumanReminderMinutes = %d, want 120", cfg.HumanReminderMinutes)
 	}
 	if !cfg.IngestEnabled {
 		t.Error("IngestEnabled should default true")
@@ -39,8 +39,8 @@ func TestLoadConfigOverlayPartial(t *testing.T) {
 	}
 
 	cfg := loadConfig(home)
-	if cfg.IdleCloseMinutes != 3 {
-		t.Errorf("IdleCloseMinutes = %d, want 3", cfg.IdleCloseMinutes)
+	if cfg.HumanReminderMinutes != 120 {
+		t.Errorf("deprecated idle setting changed reminder: %d", cfg.HumanReminderMinutes)
 	}
 	if !cfg.IngestEnabled {
 		t.Error("IngestEnabled should still default true")
@@ -61,7 +61,34 @@ func TestLoadConfigMalformedFallsBack(t *testing.T) {
 	}
 
 	cfg := loadConfig(home)
-	if cfg.IdleCloseMinutes != 10 || !cfg.IngestEnabled {
+	if cfg.HumanReminderMinutes != 120 || !cfg.IngestEnabled {
 		t.Errorf("malformed config should yield defaults, got %+v", cfg)
+	}
+}
+
+func TestLoadConfigReminderValidation(t *testing.T) {
+	for _, tc := range []struct {
+		name, body string
+		want       int
+	}{
+		{"configured", `{"human_reminder_minutes":90,"idle_close_minutes":1}`, 90},
+		{"zero", `{"human_reminder_minutes":0}`, 120},
+		{"negative", `{"human_reminder_minutes":-1}`, 120},
+		{"overflow", `{"human_reminder_minutes":9223372036854775807}`, 120},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			dir := filepath.Join(home, ".hh-tracker")
+			if err := os.MkdirAll(dir, 0755); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(filepath.Join(dir, "config.json"), []byte(tc.body), 0644); err != nil {
+				t.Fatal(err)
+			}
+			cfg := loadConfig(home)
+			if cfg.HumanReminderMinutes != tc.want {
+				t.Fatalf("reminder=%d want %d", cfg.HumanReminderMinutes, tc.want)
+			}
+		})
 	}
 }
