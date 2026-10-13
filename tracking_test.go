@@ -1,7 +1,9 @@
 package main
 
 import (
+	"context"
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -48,6 +50,60 @@ func TestTrackingInitializedProjectSharedAcrossChats(t *testing.T) {
 	other := trackAt(t, db, humanEvent("other-project", "chat", "new"), now)
 	if other.Initialized || !other.Ask || other.Pending != "initialize" {
 		t.Fatalf("new project should ask: %+v", other)
+	}
+}
+
+func TestTrackingWorkspaceInitializationPreservesProjectContinuityClaim(t *testing.T) {
+	db := openTestDB(t)
+	cfg := loadConfig(t.TempDir())
+	initializeAt(t, db, "canonical", time.Now().Add(-3*time.Hour))
+	call := func(args map[string]any) TrackingResult {
+		t.Helper()
+		args["client"], args["event_type"] = "test", "human_prompt"
+		args["confirmed_human"], args["root"] = true, true
+		result, err := hhTrackingHandler(db, cfg)(context.Background(), callReq(args))
+		if err != nil {
+			t.Fatal(err)
+		}
+		var state TrackingResult
+		if err := json.Unmarshal([]byte(textOf(t, result)), &state); err != nil {
+			t.Fatal(err)
+		}
+		return state
+	}
+	continuity := call(map[string]any{"project": "canonical", "chat": "owner", "event_id": "return"})
+	if !continuity.Ask || continuity.Pending != "continuity" || continuity.ClaimToken == "" {
+		t.Fatalf("missing owner question: %+v", continuity)
+	}
+	cwd := t.TempDir()
+	provisional := call(map[string]any{"cwd": cwd, "chat": "new-chat", "event_id": "workspace"})
+	if !provisional.Ask || provisional.Pending != "initialize" || provisional.ClaimToken == "" {
+		t.Fatalf("missing workspace question: %+v", provisional)
+	}
+	joined := call(map[string]any{
+		"action": "initialize", "project": "canonical", "cwd": cwd,
+		"chat": "new-chat", "event_id": "join", "claim_token": provisional.ClaimToken,
+	})
+	if !joined.Initialized || joined.Pending != "continuity" || joined.Ask || joined.ClaimToken != "" {
+		t.Fatalf("workspace initialization changed canonical question: %+v", joined)
+	}
+	var pending, token, owner string
+	if err := db.QueryRow(`SELECT pending,claim_token,claim_owner FROM tracking_contexts WHERE scope=?`, continuity.ContextID).Scan(&pending, &token, &owner); err != nil {
+		t.Fatal(err)
+	}
+	if pending != "continuity" || token != continuity.ClaimToken || owner != "test\x00owner" {
+		t.Fatalf("persisted owner changed: pending=%q token=%q owner=%q", pending, token, owner)
+	}
+	resolved := call(map[string]any{
+		"action": "resolve", "project": "canonical", "chat": "owner",
+		"event_id": "answer", "claim_token": continuity.ClaimToken,
+	})
+	if resolved.Pending != "" || resolved.Ask {
+		t.Fatalf("original owner cannot resolve: %+v", resolved)
+	}
+	reused := call(map[string]any{"cwd": cwd, "chat": "new-chat", "event_id": "continue"})
+	if reused.ContextID != continuity.ContextID || !reused.Initialized || reused.Ask || reused.Pending != "" {
+		t.Fatalf("workspace binding or initialized behavior changed: %+v", reused)
 	}
 }
 

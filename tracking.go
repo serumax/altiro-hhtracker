@@ -169,9 +169,13 @@ func trackProject(db *sql.DB, input TrackingInput, now time.Time, reminder time.
 			if input.Project == "" {
 				return TrackingResult{}, fmt.Errorf("initialization requires a confirmed project name")
 			}
+			// A workspace claim may bind a folder, not resolve an existing
+			// project's continuity question owned by another chat.
+			if !state.Initialized {
+				state.Pending = ""
+				state.clearClaim()
+			}
 			state.Initialized = true
-			state.Pending = ""
-			state.clearClaim()
 		} else if input.Action == "resolve" {
 			if !state.Initialized || state.Pending != "continuity" {
 				return TrackingResult{}, fmt.Errorf("only initialized continuity questions can be resolved; initialize a missing project")
