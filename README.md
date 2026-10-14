@@ -205,3 +205,10 @@ For a safe local check, run `go test ./... -count=1`; the executable integration
 test builds into a temporary directory and uses temporary HOME/database/config
 paths. It exercises root confirmation, initialization, task start/close, reused
 chats, duplicate events and two-hour continuity without sleeping.
+
+### Recovering a lost tracking question
+
+A repeated event does not allocate another question or advance human activity.
+The root chat can recover its existing token and pending question after a lost
+response, and may relay it if it was not already shown or answered. A question
+already shown must not be repeated; another chat cannot recover its owner token.

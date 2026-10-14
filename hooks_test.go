@@ -44,7 +44,7 @@ func TestCodexHookInjectsActionableUnconfirmedContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	context := hookContext(t, out.Bytes())
-	for _, required := range []string{"hh_tracking", "turn:human", "confirm", "root"} {
+	for _, required := range []string{"hh_tracking", "turn:human", "confirm", "root", "own claim_token", "not already shown or answered", "do not repeat a question already shown"} {
 		if !strings.Contains(context, required) {
 			t.Fatalf("missing %s: %s", required, context)
 		}

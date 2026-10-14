@@ -56,6 +56,10 @@ Pending clarification remains until the human answers. Other chats and duplicate
 events must not ask again while a question claim is active. Claims expire after
 five minutes so another confirmed human interaction can recover an abandoned
 question. The owning chat can retrieve its claim token without asking again.
+If transport lost the original response, an owning chat may recover a still-pending
+question even when `ask=false`: require its own returned `claim_token` and confirm
+that the question was not already shown or answered. Never re-present a question
+already shown, copy another chat's token, or treat recovery as new human activity.
 Resolve a continuity question with `hh_tracking(action="resolve", ...,
 claim_token=<owning token>)` after explicit human confirmation. Resolution changes
 context only, never HH timestamps. Use the existing manual/update tools for any
