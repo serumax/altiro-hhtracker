@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"time"
@@ -30,6 +29,20 @@ func main() {
 		case "install":
 			installCmd()
 			return
+		case "hook":
+			if len(os.Args) != 3 || os.Args[2] != "codex" {
+				fmt.Fprintln(os.Stderr, "Usage: altiro-hhtracker hook codex")
+				os.Exit(1)
+			}
+			home, err := os.UserHomeDir()
+			if err == nil {
+				err = runCodexHook(os.Stdin, os.Stdout, home, time.Now())
+			}
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "HH Tracker hook unavailable: %v\n", err)
+				os.Exit(1)
+			}
+			return
 		case "init":
 			initCmd()
 			return
@@ -47,22 +60,9 @@ func main() {
 		log.Fatalf("UserHomeDir: %v", err)
 	}
 
-	dbPath := filepath.Join(home, ".hh-tracker", "hh.db")
-	// Migration source: where the Python server kept the database.
-	srcPath := filepath.Join(home, ".claude", "mcp-servers", "hh-tracker", "hh.db")
-
-	// Ensure the destination directory exists before migration so that
-	// migrateDB can create the file if the source is present.
-	if err := os.MkdirAll(filepath.Dir(dbPath), 0755); err != nil {
-		log.Printf("mkdir %s: %v", filepath.Dir(dbPath), err)
-	}
-	if err := migrateDB(srcPath, dbPath); err != nil {
-		log.Printf("migrateDB: %v", err)
-	}
-
-	db, err := openDB(dbPath)
+	db, err := openTrackerDB(home)
 	if err != nil {
-		log.Fatalf("openDB: %v", err)
+		log.Fatalf("open tracker database: %v", err)
 	}
 	defer db.Close()
 
@@ -79,7 +79,7 @@ func main() {
 			mcp.Description("Descripción breve del trabajo.")),
 		mcp.WithString("proyecto",
 			mcp.Description("Nombre del proyecto (default: general).")),
-	), withActivity(db, hhStartHandler(db)))
+	), hhStartHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_close",
 		mcp.WithDescription("Cierra una entrada abierta y registra la duración total."),
@@ -87,17 +87,17 @@ func main() {
 			mcp.Description("ID de la entrada abierta a cerrar.")),
 		mcp.WithString("resumen",
 			mcp.Description("Resumen opcional del trabajo realizado.")),
-	), withActivity(db, hhCloseHandler(db)))
+	), hhCloseHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_status",
 		mcp.WithDescription("Lista todas las entradas actualmente abiertas."),
-	), withActivity(db, hhStatusHandler(db)))
+	), hhStatusHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_delete",
 		mcp.WithDescription("Borra una entrada por ID (abierta o cerrada)."),
 		mcp.WithNumber("entry_id", mcp.Required(),
 			mcp.Description("ID de la entrada a borrar.")),
-	), withActivity(db, hhDeleteHandler(db)))
+	), hhDeleteHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_update",
 		mcp.WithDescription("Actualiza campos de una entrada existente. Solo se pasan los campos a cambiar."),
@@ -115,7 +115,7 @@ func main() {
 			mcp.Description("Nuevo resumen.")),
 		mcp.WithNumber("duracion_hh",
 			mcp.Description("Duración explícita en horas. Si se omite y hay inicio y fin, se recalcula.")),
-	), withActivity(db, hhUpdateHandler(db)))
+	), hhUpdateHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_report",
 		mcp.WithDescription("Lista las entradas cerradas en un rango de fechas opcional."),
@@ -125,7 +125,7 @@ func main() {
 			mcp.Description("Fecha de fin YYYY-MM-DD (inclusive).")),
 		mcp.WithString("proyecto",
 			mcp.Description("Filtra por proyecto (opcional).")),
-	), withActivity(db, hhReportHandler(db)))
+	), hhReportHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_manual",
 		mcp.WithDescription("Registra una entrada de tiempo manualmente."),
@@ -139,7 +139,7 @@ func main() {
 			mcp.Description("Duración en horas fraccionarias.")),
 		mcp.WithString("resumen",
 			mcp.Description("Resumen opcional.")),
-	), withActivity(db, hhManualHandler(db)))
+	), hhManualHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_semana",
 		mcp.WithDescription("Reporte de horas de la semana."),
@@ -147,7 +147,7 @@ func main() {
 			mcp.Description("Desplazamiento de semana (0=esta semana, -1=semana pasada).")),
 		mcp.WithString("proyecto",
 			mcp.Description("Filtra por proyecto (opcional).")),
-	), withActivity(db, hhSemanaHandler(db)))
+	), hhSemanaHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_mes",
 		mcp.WithDescription("Reporte de horas del mes."),
@@ -155,7 +155,7 @@ func main() {
 			mcp.Description("Desplazamiento de mes (0=este mes, -1=mes pasado).")),
 		mcp.WithString("proyecto",
 			mcp.Description("Filtra por proyecto (opcional).")),
-	), withActivity(db, hhMesHandler(db)))
+	), hhMesHandler(db))
 
 	s.AddTool(mcp.NewTool("hh_costos",
 		mcp.WithDescription("Reporte de costo y tokens de respuestas de agentes, agrupado por proyecto y modelo."),
@@ -167,7 +167,21 @@ func main() {
 			mcp.Description("Filtra por proyecto (opcional).")),
 		mcp.WithString("modelo",
 			mcp.Description("Filtra por modelo (opcional).")),
-	), withActivity(db, hhCostosHandler(db)))
+	), hhCostosHandler(db))
+
+	s.AddTool(mcp.NewTool("hh_tracking",
+		mcp.WithDescription("Check shared project context using confirmed root human events. Never opens or closes hour entries. Initialize missing projects or resolve continuity questions using the owning claim token."),
+		mcp.WithString("action", mcp.Description("check (default), initialize or resolve")),
+		mcp.WithString("project", mcp.Description("Confirmed canonical project name; cwd marker takes precedence")),
+		mcp.WithString("cwd", mcp.Description("Local workspace directory; initialized context is reused across chats")),
+		mcp.WithString("client", mcp.Required()),
+		mcp.WithString("chat", mcp.Required()),
+		mcp.WithString("event_id", mcp.Required(), mcp.Description("Stable ID of the originating event, reused on retries; not a human session ID")),
+		mcp.WithString("event_type", mcp.Description("human_prompt only for an actual human message; tool, stop and unknown never advance human time")),
+		mcp.WithBoolean("confirmed_human", mcp.Description("Explicit provenance assertion, not inferred from a tool invocation")),
+		mcp.WithBoolean("root", mcp.Description("Only the root orchestrator may assert ownership, never a subagent")),
+		mcp.WithString("claim_token", mcp.Description("Owning chat token from the pending question; required to resolve")),
+	), hhTrackingHandler(db, cfg))
 
 	startWorker(db, cfg)
 
@@ -197,7 +211,7 @@ func hhStartHandler(db *sql.DB) server.ToolHandlerFunc {
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"✅ Entrada #%d abierta\n   %s [%s] — %s",
 			id, descripcion, proyecto, inicio[:16],
-		)), nil
+		) + entryOverlapWarning(db, id)), nil
 	}
 }
 
@@ -226,7 +240,7 @@ func hhCloseHandler(db *sql.DB) server.ToolHandlerFunc {
 			"✅ Entrada #%d cerrada\n   %s [%s]\n   %s → %s%s",
 			entry.ID, entry.Descripcion, entry.Proyecto,
 			entry.Inicio[:16], finStr, durStr,
-		)), nil
+		) + entryOverlapWarning(db, entry.ID)), nil
 	}
 }
 
@@ -271,7 +285,7 @@ func hhUpdateHandler(db *sql.DB) server.ToolHandlerFunc {
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"✏️  Entrada #%d actualizada\n   %s [%s] %s%s",
 			entry.ID, entry.Descripcion, entry.Proyecto, entry.Inicio[:16], durStr,
-		)), nil
+		) + entryOverlapWarning(db, entry.ID)), nil
 	}
 }
 
@@ -354,7 +368,7 @@ func hhManualHandler(db *sql.DB) server.ToolHandlerFunc {
 		return mcp.NewToolResultText(fmt.Sprintf(
 			"✅ Entrada manual #%d registrada\n   %s [%s]%s",
 			entry.ID, entry.Descripcion, entry.Proyecto, durStr,
-		)), nil
+		) + entryOverlapWarning(db, entry.ID)), nil
 	}
 }
 
@@ -435,8 +449,9 @@ func printHelp() {
 	fmt.Println("Servidor MCP para registrar horas de trabajo. Sin argumentos, corre por stdio.")
 	fmt.Println()
 	fmt.Println("Subcomandos:")
-	fmt.Println("  install            Registra el servidor en Claude Code / OpenCode")
+	fmt.Println("  install            Registra MCP en Codex / Claude Code / OpenCode")
 	fmt.Println("  init               Crea .hh-tracker.md en la raíz del repo actual")
+	fmt.Println("  hook codex         Reads Codex UserPromptSubmit JSON from stdin")
 	fmt.Println("  version|--version  Muestra la versión")
 	fmt.Println("  help|--help        Muestra esta ayuda")
 	fmt.Println()
@@ -486,88 +501,6 @@ func initCmd() {
 
 // ---- Install subcommand -------------------------------------------------------
 
-func installCmd() {
-	home, err := os.UserHomeDir()
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "ERROR: no se pudo encontrar el home: %v\n", err)
-		os.Exit(1)
-	}
-
-	found := false
-
-	// Claude Code — ~/.claude.json exists
-	claudeJSON := filepath.Join(home, ".claude.json")
-	if _, err := os.Stat(claudeJSON); err == nil {
-		if err := installClaudeCode(); err != nil {
-			fmt.Printf("Claude Code: ERROR — %v\n", err)
-		} else {
-			fmt.Println("Claude Code: ✓ registrado")
-			found = true
-		}
-	}
-
-	// OpenCode — ~/.config/opencode/config.json exists
-	opencodeCfg := filepath.Join(home, ".config", "opencode", "config.json")
-	if _, err := os.Stat(opencodeCfg); err == nil {
-		if err := installOpenCode(opencodeCfg); err != nil {
-			fmt.Printf("OpenCode:    ERROR — %v\n", err)
-		} else {
-			fmt.Println("OpenCode:    ✓ registrado")
-			found = true
-		}
-	}
-
-	if !found {
-		fmt.Println("No se detectó ningún cliente compatible (Claude Code, OpenCode).")
-		fmt.Println("Agrega manualmente a tu cliente MCP:")
-		fmt.Println(`  command: altiro-hhtracker`)
-		return
-	}
-
-	fmt.Println("\nListo. Reinicia tu cliente para activar altiro-hhtracker.")
-}
-
-func installClaudeCode() error {
-	// Remove first so re-runs are idempotent (mcp add fails if name exists).
-	exec.Command("claude", "mcp", "remove", "altiro-hhtracker", "--scope", "user").Run()
-	out, err := exec.Command("claude", "mcp", "add", "altiro-hhtracker", "--scope", "user", "--", "altiro-hhtracker").CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v: %s", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-func installOpenCode(cfgPath string) error {
-	raw, err := os.ReadFile(cfgPath)
-	if err != nil {
-		return fmt.Errorf("leer config: %v", err)
-	}
-
-	var cfg map[string]any
-	if err := json.Unmarshal(raw, &cfg); err != nil {
-		return fmt.Errorf("parsear config: %v", err)
-	}
-
-	if cfg["mcp"] == nil {
-		cfg["mcp"] = map[string]any{}
-	}
-	mcpBlock, ok := cfg["mcp"].(map[string]any)
-	if !ok {
-		return fmt.Errorf("la clave 'mcp' en config.json no es un objeto")
-	}
-
-	mcpBlock["altiro-hhtracker"] = map[string]any{
-		"type":    "local",
-		"command": "altiro-hhtracker",
-	}
-
-	out, err := json.MarshalIndent(cfg, "", "  ")
-	if err != nil {
-		return fmt.Errorf("serializar config: %v", err)
-	}
-	return os.WriteFile(cfgPath, out, 0644)
-}
-
 // normalizeTimestamp converts a bare HH:MM string to a full ISO timestamp
 // using today's date. Strings that already contain a date separator are
 // returned unchanged (including empty strings).
@@ -578,4 +511,39 @@ func normalizeTimestamp(s string) string {
 	// Assume HH:MM — prepend today's date.
 	today := time.Now().Format("2006-01-02")
 	return today + "T" + s + ":00.000000"
+}
+
+// Warning only: recording remains successful and other rows are never altered.
+func entryOverlapWarning(db *sql.DB, id int64) string {
+	entry, err := getEntry(db, id)
+	if err != nil {
+		return "\nWarning: overlap check unavailable."
+	}
+	ids, err := overlappingEntryIDs(db, entry)
+	if err != nil {
+		return "\nWarning: overlap check unavailable."
+	}
+	if len(ids) == 0 {
+		return ""
+	}
+	return fmt.Sprintf("\nWarning: time overlap with entries %v. Review human hours; no other entries were changed.", ids)
+}
+
+func hhTrackingHandler(db *sql.DB, cfg Config) server.ToolHandlerFunc {
+	return func(ctx context.Context, req mcp.CallToolRequest) (*mcp.CallToolResult, error) {
+		input := TrackingInput{
+			Action: req.GetString("action", "check"), Project: req.GetString("project", ""), Cwd: req.GetString("cwd", ""),
+			Client: req.GetString("client", ""), Chat: req.GetString("chat", ""), EventID: req.GetString("event_id", ""),
+			EventType: req.GetString("event_type", "unknown"), ConfirmedHuman: req.GetBool("confirmed_human", false), Root: req.GetBool("root", false), ClaimToken: req.GetString("claim_token", ""),
+		}
+		result, err := trackProject(db, input, time.Now(), time.Duration(cfg.HumanReminderMinutes)*time.Minute)
+		if err != nil {
+			return mcp.NewToolResultText(fmt.Sprintf("ERROR: %v", err)), nil
+		}
+		body, err := json.Marshal(result)
+		if err != nil {
+			return mcp.NewToolResultText(fmt.Sprintf("ERROR: %v", err)), nil
+		}
+		return mcp.NewToolResultText(string(body)), nil
+	}
 }

@@ -5,8 +5,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"os"
-	"strings"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -45,6 +45,31 @@ CREATE TABLE IF NOT EXISTS responses (
 CREATE TABLE IF NOT EXISTS ingest_state (
 	source     TEXT PRIMARY KEY,
 	watermark  TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tracking_contexts (
+ scope TEXT PRIMARY KEY,
+ project TEXT NOT NULL,
+ initialized INTEGER NOT NULL DEFAULT 0,
+ last_human_at INTEGER,
+ pending TEXT NOT NULL DEFAULT '',
+ claim_owner TEXT NOT NULL DEFAULT '',
+ claim_token TEXT NOT NULL DEFAULT '',
+ claim_expires_at INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE TABLE IF NOT EXISTS tracking_workspaces (
+ cwd TEXT PRIMARY KEY,
+ scope TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS tracking_events (
+ client TEXT NOT NULL,
+ chat TEXT NOT NULL,
+ event_id TEXT NOT NULL,
+ action TEXT NOT NULL,
+ scope TEXT NOT NULL,
+ PRIMARY KEY (client, chat, event_id, action)
 );
 
 CREATE TABLE IF NOT EXISTS meta (
@@ -142,40 +167,57 @@ func insertOpen(db *sql.DB, descripcion, proyecto string) (int64, string, error)
 
 // closeEntry marks an open entry as cerrado, computes duracion_hh, and returns the updated entry.
 func closeEntry(db *sql.DB, id int, resumen string) (Entry, error) {
-	var inicio string
-	err := db.QueryRow(
-		`SELECT inicio FROM entries WHERE id=? AND estado='abierto'`, id,
-	).Scan(&inicio)
-	if err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return Entry{}, fmt.Errorf("No se encontró la entrada #%d o ya está cerrada.", id)
-		}
-		return Entry{}, err
-	}
-
-	inicioT, err := parseTS(inicio)
-	if err != nil {
-		return Entry{}, fmt.Errorf("closeEntry parse inicio: %w", err)
-	}
-	fin := time.Now()
-	durHH := fin.Sub(inicioT).Seconds() / 3600
-	finStr := fin.Format(tsLayout)
-
-	_, err = db.Exec(
-		`UPDATE entries SET estado='cerrado', fin=?, duracion_hh=?, resumen=? WHERE id=?`,
-		finStr, durHH, nullableString(resumen), id,
-	)
+	tx, err := db.Begin()
 	if err != nil {
 		return Entry{}, err
 	}
-
-	return getEntry(db, int64(id))
+	defer tx.Rollback()
+	entry, err := getEntryFrom(tx, int64(id))
+	if errors.Is(err, sql.ErrNoRows) || (err == nil && entry.Estado != "abierto") {
+		return Entry{}, fmt.Errorf("No se encontró la entrada #%d o ya está cerrada.", id)
+	}
+	if err != nil {
+		return Entry{}, err
+	}
+	start, err := parseTS(entry.Inicio)
+	if err != nil {
+		return Entry{}, fmt.Errorf("invalid start: %w", err)
+	}
+	end := time.Now()
+	hours, err := elapsedHours(start, end)
+	if err != nil {
+		return Entry{}, err
+	}
+	entry.Fin = sql.NullString{String: end.Format(tsLayout), Valid: true}
+	entry.DuracionHH = sql.NullFloat64{Float64: hours, Valid: true}
+	entry.Resumen = sql.NullString{String: resumen, Valid: resumen != ""}
+	entry.Estado = "cerrado"
+	res, err := tx.Exec(`UPDATE entries SET estado='cerrado', fin=?, duracion_hh=?, resumen=? WHERE id=? AND estado='abierto'`, entry.Fin, entry.DuracionHH, entry.Resumen, id)
+	if err != nil {
+		return Entry{}, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return Entry{}, err
+	}
+	if n != 1 {
+		return Entry{}, fmt.Errorf("entry #%d is already closed", id)
+	}
+	if err := tx.Commit(); err != nil {
+		return Entry{}, err
+	}
+	return entry, nil
 }
 
-// deleteEntry removes an entry (open or closed) by id. It returns an error
-// when no row matches, so callers can report "not found" to the user.
+// deleteEntry clears response links and removes the entry in one transaction.
+// Response metrics remain intact.
 func deleteEntry(db *sql.DB, id int) error {
-	res, err := db.Exec(`DELETE FROM entries WHERE id=?`, id)
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM entries WHERE id=?`, id)
 	if err != nil {
 		return err
 	}
@@ -186,83 +228,102 @@ func deleteEntry(db *sql.DB, id int) error {
 	if n == 0 {
 		return fmt.Errorf("No se encontró la entrada #%d.", id)
 	}
-	return nil
+	if _, err := tx.Exec(`UPDATE responses SET entry_id=NULL WHERE entry_id=?`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
-// updateEntry patches the given fields of an entry. Empty strings and a zero
-// duracionHH mean "leave unchanged", matching the rest of this package. When
-// the row ends up with both inicio and fin and no explicit duracionHH was
-// given, duracion_hh is recomputed from those timestamps.
+// updateEntry patches fields atomically. Empty strings and zero duration mean
+// unchanged. A positive explicit duration overrides elapsed time; otherwise
+// complete timestamps recalculate duration. Updating fin does not close a row.
 func updateEntry(db *sql.DB, id int, descripcion, proyecto, inicio, fin, resumen string, duracionHH float64) (Entry, error) {
-	inicio = normalizeTimestamp(inicio)
-	fin = normalizeTimestamp(fin)
-
-	var sets []string
-	var args []interface{}
-	add := func(col string, val interface{}) {
-		sets = append(sets, col+"=?")
-		args = append(args, val)
+	if err := validateDuration(duracionHH); err != nil {
+		return Entry{}, err
 	}
-
-	if descripcion != "" {
-		add("descripcion", descripcion)
-	}
-	if proyecto != "" {
-		add("proyecto", proyecto)
-	}
-	if inicio != "" {
-		add("inicio", inicio)
-	}
-	if fin != "" {
-		add("fin", fin)
-	}
-	if resumen != "" {
-		add("resumen", resumen)
-	}
-	if duracionHH > 0 {
-		add("duracion_hh", duracionHH)
-	}
-
-	if len(sets) == 0 {
+	if descripcion == "" && proyecto == "" && inicio == "" && fin == "" && resumen == "" && duracionHH == 0 {
 		return Entry{}, fmt.Errorf("ERROR: no hay campos para actualizar.")
 	}
-
-	args = append(args, id)
-	res, err := db.Exec(`UPDATE entries SET `+strings.Join(sets, ", ")+` WHERE id=?`, args...)
+	tx, err := db.Begin()
 	if err != nil {
 		return Entry{}, err
 	}
-	n, err := res.RowsAffected()
-	if err != nil {
-		return Entry{}, err
-	}
-	if n == 0 {
+	defer tx.Rollback()
+	entry, err := getEntryFrom(tx, int64(id))
+	if errors.Is(err, sql.ErrNoRows) {
 		return Entry{}, fmt.Errorf("No se encontró la entrada #%d.", id)
 	}
-
-	updated, err := getEntry(db, int64(id))
 	if err != nil {
 		return Entry{}, err
 	}
-
-	// Recompute duration when times are present and no explicit value was given.
-	if duracionHH <= 0 && updated.Fin.Valid && updated.Inicio != "" {
-		inicioT, err := parseTS(updated.Inicio)
+	if descripcion != "" {
+		entry.Descripcion = descripcion
+	}
+	if proyecto != "" {
+		entry.Proyecto = proyecto
+	}
+	if resumen != "" {
+		entry.Resumen = sql.NullString{String: resumen, Valid: true}
+	}
+	if inicio != "" {
+		start, err := parseTS(normalizeTimestamp(inicio))
 		if err != nil {
-			return Entry{}, fmt.Errorf("updateEntry parse inicio: %w", err)
+			return Entry{}, fmt.Errorf("invalid start: %w", err)
 		}
-		finT, err := parseTS(updated.Fin.String)
+		entry.Inicio = start.Format(tsLayout)
+	}
+	if fin != "" {
+		end, err := parseTS(normalizeTimestamp(fin))
 		if err != nil {
-			return Entry{}, fmt.Errorf("updateEntry parse fin: %w", err)
+			return Entry{}, fmt.Errorf("invalid end: %w", err)
 		}
-		durHH := finT.Sub(inicioT).Seconds() / 3600
-		if _, err := db.Exec(`UPDATE entries SET duracion_hh=? WHERE id=?`, durHH, id); err != nil {
+		entry.Fin = sql.NullString{String: end.Format(tsLayout), Valid: true}
+	}
+	start, err := parseTS(entry.Inicio)
+	if err != nil {
+		return Entry{}, fmt.Errorf("invalid start: %w", err)
+	}
+	if entry.Fin.Valid {
+		end, err := parseTS(entry.Fin.String)
+		if err != nil {
+			return Entry{}, fmt.Errorf("invalid end: %w", err)
+		}
+		hours, err := elapsedHours(start, end)
+		if err != nil {
 			return Entry{}, err
 		}
-		return getEntry(db, int64(id))
+		if duracionHH == 0 {
+			entry.DuracionHH = sql.NullFloat64{Float64: hours, Valid: true}
+		}
 	}
+	if duracionHH > 0 {
+		entry.DuracionHH = sql.NullFloat64{Float64: duracionHH, Valid: true}
+	}
+	_, err = tx.Exec(`UPDATE entries SET descripcion=?, proyecto=?, inicio=?, fin=?, resumen=?, duracion_hh=? WHERE id=?`, entry.Descripcion, entry.Proyecto, entry.Inicio, entry.Fin, entry.Resumen, entry.DuracionHH, id)
+	if err != nil {
+		return Entry{}, err
+	}
+	if err := tx.Commit(); err != nil {
+		return Entry{}, err
+	}
+	return entry, nil
+}
 
-	return updated, nil
+// elapsedHours refuses reversed intervals and saturated time.Sub results.
+func elapsedHours(start, end time.Time) (float64, error) {
+	elapsed := end.Sub(start)
+	if end.Before(start) || !start.Add(elapsed).Equal(end) {
+		return 0, fmt.Errorf("time interval must be ordered and representable")
+	}
+	return elapsed.Hours(), nil
+}
+
+// validateDuration also bounds conversion to a Go time.Duration for manual hours.
+func validateDuration(hours float64) error {
+	if math.IsNaN(hours) || math.IsInf(hours, 0) || hours < 0 || hours >= float64(math.MaxInt64)/float64(time.Hour) {
+		return fmt.Errorf("duration must be finite, nonnegative and representable")
+	}
+	return nil
 }
 
 // listOpen returns all open entries ordered by inicio DESC.
@@ -303,8 +364,15 @@ func listReporte(db *sql.DB, desde, hasta, proyecto string) ([]Entry, error) {
 }
 
 // insertManual handles hh_manual Mode A (inicio+fin) and Mode B (duracion_hh only).
-// Timestamps must already be normalized to full ISO format by the caller.
+// Accepts local timestamps or HH:MM, or a positive duration alone.
 func insertManual(db *sql.DB, descripcion, proyecto, inicio, fin string, duracionHH float64, resumen string) (Entry, error) {
+	if err := validateDuration(duracionHH); err != nil {
+		return Entry{}, err
+	}
+	if (inicio == "") != (fin == "") {
+		return Entry{}, fmt.Errorf("provide both start and end, or duration alone")
+	}
+	inicio, fin = normalizeTimestamp(inicio), normalizeTimestamp(fin)
 	var inicioStr, finStr string
 	var durHH float64
 
@@ -318,9 +386,12 @@ func insertManual(db *sql.DB, descripcion, proyecto, inicio, fin string, duracio
 		if err != nil {
 			return Entry{}, fmt.Errorf("insertManual parse fin: %w", err)
 		}
-		durHH = finT.Sub(inicioT).Seconds() / 3600
-		inicioStr = inicio
-		finStr = fin
+		durHH, err = elapsedHours(inicioT, finT)
+		if err != nil {
+			return Entry{}, err
+		}
+		inicioStr = inicioT.Format(tsLayout)
+		finStr = finT.Format(tsLayout)
 	} else if duracionHH > 0 {
 		// Mode B: back-compute inicio from now.
 		finT := time.Now()
@@ -427,11 +498,60 @@ func scanEntries(rows *sql.Rows) ([]Entry, error) {
 }
 
 func getEntry(db *sql.DB, id int64) (Entry, error) {
+	return getEntryFrom(db, id)
+}
+
+func getEntryFrom(q interface{ QueryRow(string, ...any) *sql.Row }, id int64) (Entry, error) {
 	var e Entry
-	err := db.QueryRow(
+	err := q.QueryRow(
 		`SELECT id, descripcion, proyecto, inicio, fin, duracion_hh, resumen, estado
 		 FROM entries WHERE id=?`, id,
 	).Scan(&e.ID, &e.Descripcion, &e.Proyecto, &e.Inicio,
 		&e.Fin, &e.DuracionHH, &e.Resumen, &e.Estado)
 	return e, err
+}
+
+// overlappingEntryIDs reports human-time overlaps across projects without
+// changing entries. An open interval has no known end; adjacency is not overlap.
+func overlappingEntryIDs(db *sql.DB, entry Entry) ([]int64, error) {
+	start, err := parseTS(entry.Inicio)
+	if err != nil {
+		return nil, err
+	}
+	var end time.Time
+	if entry.Fin.Valid {
+		end, err = parseTS(entry.Fin.String)
+		if err != nil {
+			return nil, err
+		}
+		if !end.After(start) {
+			return nil, nil
+		}
+	}
+	rows, err := db.Query(`SELECT id, inicio, fin FROM entries WHERE id<>?`, entry.ID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		var otherStartString string
+		var otherEndString sql.NullString
+		if err := rows.Scan(&id, &otherStartString, &otherEndString); err != nil {
+			return nil, err
+		}
+		otherStart, err := parseTS(otherStartString)
+		if err != nil || (!end.IsZero() && !otherStart.Before(end)) {
+			continue
+		}
+		if otherEndString.Valid {
+			otherEnd, err := parseTS(otherEndString.String)
+			if err != nil || !otherEnd.After(otherStart) || !start.Before(otherEnd) {
+				continue
+			}
+		}
+		ids = append(ids, id)
+	}
+	return ids, rows.Err()
 }

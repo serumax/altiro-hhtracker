@@ -3,10 +3,12 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/mark3labs/mcp-go/mcp"
 )
@@ -559,5 +561,73 @@ func TestDoInit_CreatesFileThenIdempotent(t *testing.T) {
 	b2, _ := os.ReadFile(path)
 	if string(b2) != string(b) {
 		t.Errorf("file bytes changed on second doInit:\nbefore=%q\nafter=%q", b, b2)
+	}
+}
+
+func TestManualOverlapWarningPreservesOtherEntry(t *testing.T) {
+	db := newTestDB(t)
+	seedClosed(t, db, "existing", "other-project", "2026-08-01T09:00:00", "2026-08-01T10:00:00", 1)
+	before, _ := getEntry(db, 1)
+	result, err := hhManualHandler(db)(context.Background(), callReq(map[string]any{
+		"descripcion": "new task", "proyecto": "project", "inicio": "2026-08-01T09:30:00", "fin": "2026-08-01T10:30:00",
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if text := textOf(t, result); !strings.Contains(text, "overlap") {
+		t.Fatalf("missing overlap warning: %s", text)
+	}
+	after, _ := getEntry(db, 1)
+	if after != before {
+		t.Fatal("overlap warning changed existing entry")
+	}
+	entries, _ := listClosed(db, "", "", "")
+	if len(entries) != 2 {
+		t.Fatalf("warning prevented recording: %d", len(entries))
+	}
+}
+
+func TestManualAdjacentEntriesDoNotWarn(t *testing.T) {
+	db := newTestDB(t)
+	seedClosed(t, db, "existing", "project", "2026-08-01T09:00:00", "2026-08-01T10:00:00", 1)
+	result, _ := hhManualHandler(db)(context.Background(), callReq(map[string]any{
+		"descripcion": "new task", "proyecto": "project", "inicio": "2026-08-01T10:00:00", "fin": "2026-08-01T11:00:00",
+	}))
+	if text := textOf(t, result); strings.Contains(text, "overlap") {
+		t.Fatalf("adjacent entries overlap: %s", text)
+	}
+}
+
+func TestHhTrackingUnknownToolsDoNotAdvanceHumanClock(t *testing.T) {
+	db := newTestDB(t)
+	cfg := loadConfig(t.TempDir())
+	now := time.Now().Add(-3 * time.Hour)
+	initial := initializeAt(t, db, "project", now)
+	args := map[string]any{"project": "project", "client": "test", "chat": "chat", "event_id": "unknown"}
+	result, err := hhTrackingHandler(db, cfg)(context.Background(), callReq(args))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var unknown TrackingResult
+	if err := json.Unmarshal([]byte(textOf(t, result)), &unknown); err != nil {
+		t.Fatal(err)
+	}
+	if unknown.Ask || unknown.LastHumanAt != initial.LastHumanAt {
+		t.Fatalf("tool became human activity: %+v", unknown)
+	}
+	args["event_id"] = "human"
+	args["event_type"] = "human_prompt"
+	args["confirmed_human"] = true
+	args["root"] = true
+	result, err = hhTrackingHandler(db, cfg)(context.Background(), callReq(args))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var human TrackingResult
+	if err := json.Unmarshal([]byte(textOf(t, result)), &human); err != nil {
+		t.Fatal(err)
+	}
+	if !human.Ask || human.Pending != "continuity" {
+		t.Fatalf("confirmed human did not see gap: %+v", human)
 	}
 }

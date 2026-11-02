@@ -360,8 +360,11 @@ func TestIngestOpencodeUsesProjectFile(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	// No project name -> derivation falls to the session directory.
-	if _, err := s.Exec(`INSERT INTO session (id, project_id, directory) VALUES ('s1', NULL, ?)`, workdir); err != nil {
+	// A canonical marker overrides the client project display name.
+	if _, err := s.Exec(`INSERT INTO project (id, name) VALUES ('named', 'display-name')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Exec(`INSERT INTO session (id, project_id, directory) VALUES ('s1', 'named', ?)`, workdir); err != nil {
 		t.Fatal(err)
 	}
 	data := `{"role":"assistant","path":{"cwd":"` + workdir + `"},"cost":0,` +
@@ -399,6 +402,12 @@ func TestIngestClaudeUsesProjectFile(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	stamp, err := time.Parse(time.RFC3339, "2026-08-30T20:00:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedClosed(t, db, "historical task", "canon", stamp.Add(-time.Hour).Local().Format(tsLayout), stamp.Add(time.Hour).Local().Format(tsLayout), 2)
+	insertOpen(db, "current task", "unrelated")
 	projects := t.TempDir()
 	slug := filepath.Join(projects, "-slug")
 	if err := os.MkdirAll(slug, 0755); err != nil {
@@ -416,8 +425,12 @@ func TestIngestClaudeUsesProjectFile(t *testing.T) {
 	}
 
 	var proyecto string
-	if err := db.QueryRow(`SELECT proyecto FROM responses WHERE external_id='msg_01ZZ'`).Scan(&proyecto); err != nil {
+	var link sql.NullInt64
+	if err := db.QueryRow(`SELECT proyecto, entry_id FROM responses WHERE external_id='msg_01ZZ'`).Scan(&proyecto, &link); err != nil {
 		t.Fatal(err)
+	}
+	if !link.Valid || link.Int64 != 1 {
+		t.Fatalf("historical attribution=%+v", link)
 	}
 	if proyecto != "canon" {
 		t.Errorf("proyecto = %q, want canon (from .hh-tracker.md)", proyecto)
