@@ -30,13 +30,17 @@ func main() {
 			installCmd()
 			return
 		case "hook":
-			if len(os.Args) != 3 || os.Args[2] != "codex" {
-				fmt.Fprintln(os.Stderr, "Usage: altiro-hhtracker hook codex")
+			if len(os.Args) != 3 || (os.Args[2] != "codex" && os.Args[2] != "claude") {
+				fmt.Fprintln(os.Stderr, "Usage: altiro-hhtracker hook codex|claude")
 				os.Exit(1)
 			}
 			home, err := os.UserHomeDir()
 			if err == nil {
-				err = runCodexHook(os.Stdin, os.Stdout, home, time.Now())
+				if os.Args[2] == "claude" {
+					err = runClaudeHook(os.Stdin, os.Stdout, home, time.Now())
+				} else {
+					err = runCodexHook(os.Stdin, os.Stdout, home, time.Now())
+				}
 			}
 			if err != nil {
 				fmt.Fprintf(os.Stderr, "HH Tracker hook unavailable: %v\n", err)
@@ -452,6 +456,7 @@ func printHelp() {
 	fmt.Println("  install            Registra MCP en Codex / Claude Code / OpenCode")
 	fmt.Println("  init               Crea .hh-tracker.md en la raíz del repo actual")
 	fmt.Println("  hook codex         Reads Codex UserPromptSubmit JSON from stdin")
+	fmt.Println("  hook claude        Reads Claude Code UserPromptSubmit JSON from stdin")
 	fmt.Println("  version|--version  Muestra la versión")
 	fmt.Println("  help|--help        Muestra esta ayuda")
 	fmt.Println()
