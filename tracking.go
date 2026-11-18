@@ -25,6 +25,10 @@ type TrackingInput struct {
 	ConfirmedHuman bool   `json:"confirmed_human"`
 	Root           bool   `json:"root"`
 	ClaimToken     string `json:"claim_token,omitempty"`
+	// Worked is the user's answer to the continuity question: true keeps the
+	// hours of the gap; false closes open entries at the last activity and
+	// reopens them when the user came back. Required to resolve.
+	Worked *bool `json:"worked,omitempty"`
 }
 
 // TrackingResult shares project context, not a human session or chat-specific
@@ -180,7 +184,16 @@ func trackProject(db *sql.DB, input TrackingInput, now time.Time, reminder time.
 			if !state.Initialized || state.Pending != "continuity" {
 				return TrackingResult{}, fmt.Errorf("only initialized continuity questions can be resolved; initialize a missing project")
 			}
+			if input.Worked == nil {
+				return TrackingResult{}, fmt.Errorf("resolve requires worked=true or worked=false from the user's answer")
+			}
+			if !*input.Worked && state.gapStarted != 0 && state.gapEnded != 0 {
+				if err := splitOpenEntriesAtGap(tx, state.Project, time.UnixMilli(state.gapStarted), time.UnixMilli(state.gapEnded)); err != nil {
+					return TrackingResult{}, fmt.Errorf("close the gap: %w", err)
+				}
+			}
 			state.Pending = ""
+			state.gapStarted, state.gapEnded = 0, 0
 			state.clearClaim()
 		} else if marker {
 			state.Initialized = true
@@ -193,8 +206,17 @@ func trackProject(db *sql.DB, input TrackingInput, now time.Time, reminder time.
 			state.Pending = "initialize"
 		}
 		if human {
+			// A gap only matters when hours are running: without an open entry
+			// there is nothing to keep or close, so a new chat does not ask.
 			if input.Action == "check" && state.Initialized && state.Pending == "" && state.LastHumanAt != 0 && now.UnixMilli()-state.LastHumanAt >= reminder.Milliseconds() {
-				state.Pending = "continuity"
+				open, err := hasOpenEntries(tx, state.Project)
+				if err != nil {
+					return TrackingResult{}, err
+				}
+				if open {
+					state.Pending = "continuity"
+					state.gapStarted, state.gapEnded = state.LastHumanAt, now.UnixMilli()
+				}
 			}
 			if now.UnixMilli() > state.LastHumanAt {
 				state.LastHumanAt = now.UnixMilli()
@@ -216,7 +238,7 @@ func trackProject(db *sql.DB, input TrackingInput, now time.Time, reminder time.
 		state.claimExpires = now.Add(trackingClaimTTL).UnixMilli()
 		state.Ask = true
 	}
-	if _, err := tx.Exec(`UPDATE tracking_contexts SET initialized=?,last_human_at=?,pending=?,claim_owner=?,claim_token=?,claim_expires_at=? WHERE scope=?`, state.Initialized, nullableHumanTime(state.LastHumanAt), state.Pending, state.claimOwner, state.claimToken, state.claimExpires, scope); err != nil {
+	if _, err := tx.Exec(`UPDATE tracking_contexts SET initialized=?,last_human_at=?,pending=?,claim_owner=?,claim_token=?,claim_expires_at=?,gap_started_at=?,gap_ended_at=? WHERE scope=?`, state.Initialized, nullableHumanTime(state.LastHumanAt), state.Pending, state.claimOwner, state.claimToken, state.claimExpires, nullableHumanTime(state.gapStarted), nullableHumanTime(state.gapEnded), scope); err != nil {
 		return TrackingResult{}, err
 	}
 	if cwd != "" && (state.Initialized || bound == "") {
@@ -270,6 +292,72 @@ type trackingContext struct {
 	claimOwner   string
 	claimToken   string
 	claimExpires int64
+	// gapStarted is the last activity before a gap; gapEnded is when the user
+	// came back. They are kept until the continuity question is answered.
+	gapStarted int64
+	gapEnded   int64
+}
+
+func hasOpenEntries(tx *sql.Tx, project string) (bool, error) {
+	var count int
+	err := tx.QueryRow(`SELECT count(*) FROM entries WHERE proyecto=? AND estado='abierto'`, project).Scan(&count)
+	return count > 0, err
+}
+
+// splitOpenEntriesAtGap applies the user's "I did not work during the gap":
+// each open entry of the project closes at the last activity and a new entry
+// with the same task opens when the user came back.
+func splitOpenEntriesAtGap(tx *sql.Tx, project string, gapStart, gapEnd time.Time) error {
+	rows, err := tx.Query(`SELECT id, descripcion, inicio FROM entries WHERE proyecto=? AND estado='abierto' ORDER BY id`, project)
+	if err != nil {
+		return err
+	}
+	type open struct {
+		id          int64
+		descripcion string
+		inicio      string
+	}
+	var entries []open
+	for rows.Next() {
+		var e open
+		if err := rows.Scan(&e.id, &e.descripcion, &e.inicio); err != nil {
+			rows.Close()
+			return err
+		}
+		entries = append(entries, e)
+	}
+	err = rows.Err()
+	rows.Close()
+	if err != nil {
+		return err
+	}
+	resumed := gapEnd.Local().Format(tsLayout)
+	for _, e := range entries {
+		start, err := parseTS(e.inicio)
+		if err != nil {
+			return fmt.Errorf("entry #%d: invalid start: %w", e.id, err)
+		}
+		// An entry opened inside the gap has no worked time before it: it
+		// simply starts again when the user came back.
+		if !start.Before(gapStart) {
+			if _, err := tx.Exec(`UPDATE entries SET inicio=? WHERE id=? AND estado='abierto'`, resumed, e.id); err != nil {
+				return err
+			}
+			continue
+		}
+		hours, err := elapsedHours(start, gapStart)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`UPDATE entries SET estado='cerrado', fin=?, duracion_hh=?, resumen=? WHERE id=? AND estado='abierto'`,
+			gapStart.Local().Format(tsLayout), hours, "Cerrado a la última actividad: el usuario confirmó que no trabajó durante la pausa.", e.id); err != nil {
+			return err
+		}
+		if _, err := tx.Exec(`INSERT INTO entries (descripcion, proyecto, inicio, estado) VALUES (?, ?, ?, 'abierto')`, e.descripcion, project, resumed); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (state *trackingContext) clearClaim() {
@@ -278,11 +366,12 @@ func (state *trackingContext) clearClaim() {
 
 func readTrackingContext(tx *sql.Tx, scope string) (trackingContext, error) {
 	var state trackingContext
-	var last sql.NullInt64
-	err := tx.QueryRow(`SELECT project,initialized,last_human_at,pending,claim_owner,claim_token,claim_expires_at FROM tracking_contexts WHERE scope=?`, scope).Scan(&state.Project, &state.Initialized, &last, &state.Pending, &state.claimOwner, &state.claimToken, &state.claimExpires)
+	var last, gapStarted, gapEnded sql.NullInt64
+	err := tx.QueryRow(`SELECT project,initialized,last_human_at,pending,claim_owner,claim_token,claim_expires_at,gap_started_at,gap_ended_at FROM tracking_contexts WHERE scope=?`, scope).Scan(&state.Project, &state.Initialized, &last, &state.Pending, &state.claimOwner, &state.claimToken, &state.claimExpires, &gapStarted, &gapEnded)
 	if last.Valid {
 		state.LastHumanAt = last.Int64
 	}
+	state.gapStarted, state.gapEnded = gapStarted.Int64, gapEnded.Int64
 	return state, err
 }
 

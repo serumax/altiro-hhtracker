@@ -121,10 +121,13 @@ the task description, so an initialized project does not ask the generic questio
 again merely because it has no open task.
 
 `hh_tracking` checks metadata from a confirmed **root human prompt**. At the next
-such interaction after at least 120 minutes without one in that project, it requests
-continuity clarification. The previous timestamp is checked before advancing it.
-Pending clarification survives other messages and restarts until explicitly
-resolved with the question owner's claim token. One chat owns a question for five
+such interaction after at least 120 minutes without one in that project, and only
+while the project has an open entry, it requests continuity clarification. The
+previous timestamp is checked before advancing it. Pending clarification survives
+other messages and restarts until resolved with the question owner's claim token
+and the user's answer (`worked`). With `worked=false`, open entries close at the
+last activity before the gap and reopen, with the same task, when the user came
+back. Questions are asked at the end of the reply, never blocking the request. One chat owns a question for five
 minutes; abandoned claims can be recovered by a later confirmed human event.
 Stable event IDs deduplicate retries, while technical chat/session IDs only identify
 the conversation. No prompt text is stored.
