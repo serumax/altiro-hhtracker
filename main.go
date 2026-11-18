@@ -185,6 +185,7 @@ func main() {
 		mcp.WithBoolean("confirmed_human", mcp.Description("Explicit provenance assertion, not inferred from a tool invocation")),
 		mcp.WithBoolean("root", mcp.Description("Only the root orchestrator may assert ownership, never a subagent")),
 		mcp.WithString("claim_token", mcp.Description("Owning chat token from the pending question; required to resolve")),
+		mcp.WithBoolean("worked", mcp.Description("Required to resolve continuity: the user's answer. true keeps the gap's hours; false closes open entries at the last activity and reopens them at the return")),
 	), hhTrackingHandler(db, cfg))
 
 	startWorker(db, cfg)
@@ -540,6 +541,10 @@ func hhTrackingHandler(db *sql.DB, cfg Config) server.ToolHandlerFunc {
 			Action: req.GetString("action", "check"), Project: req.GetString("project", ""), Cwd: req.GetString("cwd", ""),
 			Client: req.GetString("client", ""), Chat: req.GetString("chat", ""), EventID: req.GetString("event_id", ""),
 			EventType: req.GetString("event_type", "unknown"), ConfirmedHuman: req.GetBool("confirmed_human", false), Root: req.GetBool("root", false), ClaimToken: req.GetString("claim_token", ""),
+		}
+		if _, ok := req.GetArguments()["worked"]; ok {
+			worked := req.GetBool("worked", false)
+			input.Worked = &worked
 		}
 		result, err := trackProject(db, input, time.Now(), time.Duration(cfg.HumanReminderMinutes)*time.Minute)
 		if err != nil {

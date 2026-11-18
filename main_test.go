@@ -603,6 +603,7 @@ func TestHhTrackingUnknownToolsDoNotAdvanceHumanClock(t *testing.T) {
 	cfg := loadConfig(t.TempDir())
 	now := time.Now().Add(-3 * time.Hour)
 	initial := initializeAt(t, db, "project", now)
+	insertOpen(db, "task", "project")
 	args := map[string]any{"project": "project", "client": "test", "chat": "chat", "event_id": "unknown"}
 	result, err := hhTrackingHandler(db, cfg)(context.Background(), callReq(args))
 	if err != nil {

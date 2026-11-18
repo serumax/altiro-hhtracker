@@ -57,6 +57,7 @@ func TestTrackingWorkspaceInitializationPreservesProjectContinuityClaim(t *testi
 	db := openTestDB(t)
 	cfg := loadConfig(t.TempDir())
 	initializeAt(t, db, "canonical", time.Now().Add(-3*time.Hour))
+	insertOpen(db, "task", "canonical")
 	call := func(args map[string]any) TrackingResult {
 		t.Helper()
 		args["client"], args["event_type"] = "test", "human_prompt"
@@ -96,7 +97,7 @@ func TestTrackingWorkspaceInitializationPreservesProjectContinuityClaim(t *testi
 	}
 	resolved := call(map[string]any{
 		"action": "resolve", "project": "canonical", "chat": "owner",
-		"event_id": "answer", "claim_token": continuity.ClaimToken,
+		"event_id": "answer", "claim_token": continuity.ClaimToken, "worked": true,
 	})
 	if resolved.Pending != "" || resolved.Ask {
 		t.Fatalf("original owner cannot resolve: %+v", resolved)
@@ -113,6 +114,7 @@ func TestTrackingGapBoundaryAndPendingSurvivesActivity(t *testing.T) {
 			db := openTestDB(t)
 			now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
 			initializeAt(t, db, "project", now)
+			insertOpen(db, "task", "project")
 			result := trackAt(t, db, humanEvent("project", "chat", "return"), now.Add(time.Duration(minutes)*time.Minute))
 			if result.Ask != (minutes == 120) || (result.Pending != "") != (minutes == 120) {
 				t.Fatalf("boundary: %+v", result)
@@ -128,6 +130,7 @@ func TestTrackingGapBoundaryAndPendingSurvivesActivity(t *testing.T) {
 				resolve := humanEvent("project", "chat", "resolve")
 				resolve.Action = "resolve"
 				resolve.ClaimToken = result.ClaimToken
+				resolve.Worked = boolPtr(true)
 				resolved := trackAt(t, db, resolve, now.Add(122*time.Minute))
 				if resolved.Pending != "" || resolved.Ask {
 					t.Fatalf("explicit resolution: %+v", resolved)
@@ -141,6 +144,7 @@ func TestTrackingBotUnknownAndSubagentCannotAdvanceOrResolve(t *testing.T) {
 	db := openTestDB(t)
 	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
 	initial := initializeAt(t, db, "project", now)
+	insertOpen(db, "task", "project")
 	for i, input := range []TrackingInput{
 		{EventType: "tool", Root: true, ConfirmedHuman: true},
 		{EventType: "human_prompt", Root: true},
@@ -202,6 +206,7 @@ func TestTrackingConcurrentClaimsAcrossProcesses(t *testing.T) {
 	defer db2.Close()
 	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
 	initializeAt(t, db1, "project", now)
+	insertOpen(db1, "task", "project")
 	results := make(chan TrackingResult, 8)
 	failures := make(chan error, 8)
 	start := make(chan struct{})
@@ -259,6 +264,7 @@ func TestTrackingRestartAndWorkspaceInitialization(t *testing.T) {
 	init.Action = "initialize"
 	init.ClaimToken = first.ClaimToken
 	initialized := trackAt(t, db, init, now.Add(time.Minute))
+	insertOpen(db, "task", "canonical")
 	db.Close()
 	db, err = openDB(path)
 	if err != nil {
@@ -317,6 +323,7 @@ func TestTrackingOtherProjectActivityCannotMaskGap(t *testing.T) {
 	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
 	initializeAt(t, db, "a", now)
 	initializeAt(t, db, "b", now)
+	insertOpen(db, "task", "a")
 	trackAt(t, db, humanEvent("b", "chat", "active"), now.Add(119*time.Minute))
 	result := trackAt(t, db, humanEvent("a", "chat", "return"), now.Add(120*time.Minute))
 	if !result.Ask || result.Pending != "continuity" {
@@ -350,6 +357,7 @@ func TestTrackingExpiredClaimTransfersWithoutChangingHours(t *testing.T) {
 	answer := humanEvent("project", "second", "answer")
 	answer.Action = "resolve"
 	answer.ClaimToken = claimed.ClaimToken
+	answer.Worked = boolPtr(true)
 	resolved := trackAt(t, db, answer, now.Add(126*time.Minute))
 	if resolved.Pending != "" {
 		t.Fatalf("pending not resolved: %+v", resolved)
@@ -379,6 +387,7 @@ func TestTrackingLegacyHistoryAndTechnicalMetaRemainUnchanged(t *testing.T) {
 	before, _ := getEntry(db, 1)
 	now := time.Date(2026, 10, 13, 9, 0, 0, 0, time.UTC)
 	initializeAt(t, db, "project", now)
+	insertOpen(db, "task", "project")
 	if err := setMeta(db, "last_tool_call_at", now.Add(119*time.Minute).Local().Format(tsLayout)); err != nil {
 		t.Fatal(err)
 	}
@@ -428,6 +437,7 @@ func TestTrackingMarkerConfirmationPreservesPreviousHumanTime(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(cwd, projectFileName), []byte("---\nproyecto: canonical\n---\n"), 0644); err != nil {
 		t.Fatal(err)
 	}
+	insertOpen(db, "task", "canonical")
 	input.EventID = "return"
 	result := trackAt(t, db, input, now.Add(3*time.Hour))
 	if !result.Initialized || !result.Ask || result.Pending != "continuity" {

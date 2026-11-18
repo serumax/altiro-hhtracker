@@ -31,7 +31,8 @@ already initialized, the user's task request supplies the task description; do
 not repeatedly ask what to work on merely because no task is open.
 
 If the result has `pending="initialize"` and `ask=true`, ask the user once which
-project the work belongs to, in their current language. After confirmation call
+project the work belongs to, in their current language. Never block the request
+on it: first do or resume what the user asked, then ask at the end of your reply. After confirmation call
 `hh_tracking(action="initialize", project=<confirmed name>, ...,
 claim_token=<returned token>)` using the same client/chat identity and a stable
 ID for the confirmation message. Explicit project initialization persists across
@@ -44,13 +45,17 @@ to the task; do not adopt an arbitrary open entry from another chat.
 ## Two-hour continuity check
 
 On the next confirmed human interaction after at least 120 minutes without one
-in this project, `hh_tracking` sets `pending="continuity"`. The threshold can be
-configured. Only the chat that receives `ask=true` asks the continuity question:
-was the user still working on this project during the interval?
+in this project, while the project has an open entry, `hh_tracking` sets
+`pending="continuity"`. Without an open entry there are no running hours, so
+nothing is asked. The threshold can be configured. Only the chat that receives
+`ask=true` asks the continuity question: was the user still working on this
+project during the interval? Never block the request on it: first do or resume
+what the user asked, then ask at the end of your reply.
 
-Silence is NOT evidence that human work stopped. Never automatically close,
-subtract, add or backdate hours because of an idle interval. Bot/tool activity
-and work in another project do not reset this project's human clock.
+Silence alone is NOT evidence that human work stopped: never close, subtract,
+add or backdate hours on your own because of an idle interval. Only the user's
+answer decides. Bot/tool activity and work in another project do not reset this
+project's human clock.
 
 Pending clarification remains until the human answers. Other chats and duplicate
 events must not ask again while a question claim is active. Claims expire after
@@ -61,9 +66,15 @@ question even when `ask=false`: require its own returned `claim_token` and confi
 that the question was not already shown or answered. Never re-present a question
 already shown, copy another chat's token, or treat recovery as new human activity.
 Resolve a continuity question with `hh_tracking(action="resolve", ...,
-claim_token=<owning token>)` after explicit human confirmation. Resolution changes
-context only, never HH timestamps. Use the existing manual/update tools for any
-human-authorized correction. If a token is expired or stale, check again.
+claim_token=<owning token>, worked=<answer>)` after the user answers:
+
+- `worked=true`: the user worked during the interval; the open entries keep running.
+- `worked=false`: the user did not work; each open entry of the project closes at
+  the last activity before the interval, and a new entry with the same task opens
+  at the moment the user came back. Example: last activity 11:30, back at 16:30,
+  answer "no": the entry from 09:00 closes at 11:30 and a new one starts at 16:30.
+
+If a token is expired or stale, check again.
 
 ## Task start and completion
 

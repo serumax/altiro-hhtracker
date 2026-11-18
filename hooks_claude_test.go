@@ -34,7 +34,7 @@ func TestClaudeHookInjectsActionableUnconfirmedContext(t *testing.T) {
 	}
 	context := hookContext(t, out.Bytes())
 	turn := fmt.Sprintf("%d", now.UnixNano())
-	for _, required := range []string{"hh_tracking", `"client":"claude"`, `"chat":"chat-1"`, turn + ":human", "confirm", "root", "own claim_token"} {
+	for _, required := range []string{"hh_tracking", `"client":"claude"`, `"chat":"chat-1"`, turn + ":human", "confirm", "root", "own claim_token", "at the end of your reply", "never block", "worked"} {
 		if !strings.Contains(context, required) {
 			t.Fatalf("missing %s: %s", required, context)
 		}

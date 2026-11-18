@@ -311,6 +311,8 @@ func TestCodexExecutableHookAndMCPWorkflow(t *testing.T) {
 	if err != nil || entry.Estado != "cerrado" {
 		t.Fatalf("task not recorded: %+v %v", entry, err)
 	}
+	// A gap is only asked about while hours are running.
+	insertOpen(db, "next task", shared.Project)
 	input.EventID = "after-gap:human"
 	gap := trackAt(t, db, input, time.Now().Add(2*time.Hour+time.Minute))
 	if !gap.Ask || gap.Pending != "continuity" {
@@ -318,6 +320,7 @@ func TestCodexExecutableHookAndMCPWorkflow(t *testing.T) {
 	}
 	input.Action = "resolve"
 	input.EventID = "resolved-gap:human"
+	input.Worked = boolPtr(true)
 	input.ClaimToken = gap.ClaimToken
 	resolved := trackAt(t, db, input, time.Now().Add(2*time.Hour+2*time.Minute))
 	if resolved.Pending != "" {

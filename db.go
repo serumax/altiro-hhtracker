@@ -55,7 +55,9 @@ CREATE TABLE IF NOT EXISTS tracking_contexts (
  pending TEXT NOT NULL DEFAULT '',
  claim_owner TEXT NOT NULL DEFAULT '',
  claim_token TEXT NOT NULL DEFAULT '',
- claim_expires_at INTEGER NOT NULL DEFAULT 0
+ claim_expires_at INTEGER NOT NULL DEFAULT 0,
+ gap_started_at INTEGER,
+ gap_ended_at INTEGER
 );
 
 CREATE TABLE IF NOT EXISTS tracking_workspaces (
@@ -116,6 +118,20 @@ func openDB(path string) (*sql.DB, error) {
 	if _, err := db.Exec(schemaSQL); err != nil {
 		db.Close()
 		return nil, fmt.Errorf("openDB schema: %w", err)
+	}
+	// Databases created before the continuity answer lack the gap columns.
+	for _, column := range []string{"gap_started_at", "gap_ended_at"} {
+		var count int
+		if err := db.QueryRow(`SELECT count(*) FROM pragma_table_info('tracking_contexts') WHERE name=?`, column).Scan(&count); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("openDB schema: %w", err)
+		}
+		if count == 0 {
+			if _, err := db.Exec(`ALTER TABLE tracking_contexts ADD COLUMN ` + column + ` INTEGER`); err != nil {
+				db.Close()
+				return nil, fmt.Errorf("openDB schema: %w", err)
+			}
+		}
 	}
 	return db, nil
 }
