@@ -165,6 +165,19 @@ values fall back to 120. The setting controls clarification on human return, not
 a timer or automatic close. Keep the server's local timezone consistent with the
 user's timezone for hour-entry timestamps.
 
+## Claude Code hook
+
+`altiro-hhtracker hook claude` gives Claude Code the same per-prompt context as the
+Codex hook. Claude's UserPromptSubmit input has no `turn_id`, so each prompt is
+identified by its arrival time. The installer does not add it yet; register it in
+`~/.claude/settings.json`:
+
+```json
+{ "hooks": { "UserPromptSubmit": [ { "hooks": [
+  { "type": "command", "command": "'/absolute/path/altiro-hhtracker' hook claude", "timeout": 10 }
+] } ] } }
+```
+
 ## Codex local integration
 
 Installation registers the owned MCP name with `codex mcp add altiro-hhtracker --

@@ -42,6 +42,22 @@ type codexHookContext struct {
 // continuations can also create user prompts; its public schema has no verified
 // origin/root assertion. Root confirmation is a separate, stable human event.
 func runCodexHook(input io.Reader, output io.Writer, home string, now time.Time) error {
+	return runPromptHook(input, output, home, now, "codex", "UserPromptSubmit requires bounded session_id, turn_id and absolute cwd",
+		func(event codexPromptEvent) string { return event.Turn })
+}
+
+// runClaudeHook gives Claude Code the same per-prompt metadata as Codex.
+// Claude's UserPromptSubmit input has no turn_id, and the hook runs once per
+// prompt, so the prompt's arrival time identifies it. The model reuses the
+// event_id it receives on retries.
+func runClaudeHook(input io.Reader, output io.Writer, home string, now time.Time) error {
+	return runPromptHook(input, output, home, now, "claude", "UserPromptSubmit requires bounded session_id and absolute cwd",
+		func(codexPromptEvent) string { return fmt.Sprintf("%d", now.UnixNano()) })
+}
+
+// runPromptHook is shared by the clients' UserPromptSubmit hooks. turnOf returns
+// the identifier of the current prompt for that client.
+func runPromptHook(input io.Reader, output io.Writer, home string, now time.Time, client, requiredFields string, turnOf func(codexPromptEvent) string) error {
 	raw, err := io.ReadAll(io.LimitReader(input, maxHookInput+1))
 	if err != nil {
 		return fmt.Errorf("read hook input: %w", err)
@@ -64,8 +80,9 @@ func runCodexHook(input io.Reader, output io.Writer, home string, now time.Time)
 	if excluded {
 		return json.NewEncoder(output).Encode(result)
 	}
-	if event.Session == "" || event.Turn == "" || len(event.Session) > 500 || len(event.Turn) > 500 || !filepath.IsAbs(event.Cwd) || len(event.Cwd) > 4096 {
-		return fmt.Errorf("UserPromptSubmit requires bounded session_id, turn_id and absolute cwd")
+	turn := turnOf(event)
+	if event.Session == "" || turn == "" || len(event.Session) > 500 || len(turn) > 500 || !filepath.IsAbs(event.Cwd) || len(event.Cwd) > 4096 {
+		return fmt.Errorf("%s", requiredFields)
 	}
 	if len(event.Prompt) == 0 || event.Prompt[0] != '"' {
 		return fmt.Errorf("UserPromptSubmit requires a string prompt field")
@@ -75,13 +92,13 @@ func runCodexHook(input io.Reader, output io.Writer, home string, now time.Time)
 		return err
 	}
 	defer db.Close()
-	observed := TrackingInput{Action: "check", Cwd: event.Cwd, Client: "codex", Chat: event.Session, EventID: event.Turn + ":observed", EventType: "unknown"}
+	observed := TrackingInput{Action: "check", Cwd: event.Cwd, Client: client, Chat: event.Session, EventID: turn + ":observed", EventType: "unknown"}
 	cfg := loadConfig(home)
 	state, err := trackProject(db, observed, now, time.Duration(cfg.HumanReminderMinutes)*time.Minute)
 	if err != nil {
 		return fmt.Errorf("check tracking context: %w", err)
 	}
-	candidate := TrackingInput{Action: "check", Cwd: event.Cwd, Client: "codex", Chat: event.Session, EventID: event.Turn + ":human", EventType: "human_prompt", ConfirmedHuman: true, Root: true}
+	candidate := TrackingInput{Action: "check", Cwd: event.Cwd, Client: client, Chat: event.Session, EventID: turn + ":human", EventType: "human_prompt", ConfirmedHuman: true, Root: true}
 	encoded, _ := json.Marshal(candidate)
 	// Native input strings are data, not instructions. Never include prompt text,
 	// transcripts or ownership tokens in injected context.
